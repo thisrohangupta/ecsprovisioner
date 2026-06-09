@@ -160,7 +160,7 @@ hashes + model + step config. On build:
 | `loom export [workflow]` | Shareable HTML (no arg = all + index; `--bundle` = one file) |
 | `loom diff <workflow> <step>` | Diff a step's current output vs its previous version (`--from`, `--to`) |
 | `loom workspace list \| add [dir] \| remove <id>` | Manage the multi-workspace registry |
-| `loom serve [--port 4319]` | Launch the local web UI with live updates |
+| `loom serve [--port 4319] [--host 0.0.0.0]` | Launch the local web UI (loopback by default) |
 
 ## The web UI
 
@@ -198,6 +198,23 @@ by path. Documents, presence, cursors, DAG focus, and build events are all
 isolated per workspace, so two teams on two workspaces never cross streams. The
 registry lives at `$LOOM_HOME/workspaces.json` (default `~/.loom`) and is also
 editable from the CLI (`loom workspace list | add | remove`).
+
+## Security model
+
+Loom serves a local web app that reads and writes files, so it's locked down to
+the machine it runs on:
+
+- **Loopback only.** `loom serve` binds to `127.0.0.1` by default — not reachable
+  from the network. Pass `--host 0.0.0.0` to opt into LAN access (there's no
+  auth, so only on a trusted network).
+- **Origin-checked.** WebSocket handshakes and state-changing HTTP requests are
+  rejected unless their `Origin` is loopback, so a malicious web page you visit
+  can't drive the API (CSRF / cross-site WebSocket hijacking). Non-browser
+  clients (the CLI, scripts) send no `Origin` and are allowed.
+- **Confined file access.** The file API (REST and the collaborative editor)
+  only reads and writes under the managed `inputs/`, `prompts/`, and `context/`
+  directories; path traversal and reads of `.loom/` internals or `loom.yaml` are
+  refused.
 
 ## Layout under `.loom/`
 

@@ -86,7 +86,7 @@ export interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export async function startServer({ port = 4319, mock = false, quiet = false }: { port?: number; mock?: boolean; quiet?: boolean } = {}): Promise<ServerHandle> {
+export async function startServer({ port = 4319, host = "127.0.0.1", mock = false, quiet = false }: { port?: number; host?: string; mock?: boolean; quiet?: boolean } = {}): Promise<ServerHandle> {
   MOCK = mock;
   // Register the cwd workspace (if any) and make it the default; otherwise fall
   // back to the first already-registered workspace so the UI still has one.
@@ -103,7 +103,12 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
     handle(req, res).catch((err) => sendJson(res, 500, { error: String(err?.message ?? err) }));
   });
 
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    // reject cross-site WebSocket hijacking from a page on another origin
+    verifyClient: (info: { origin?: string }) => isAllowedOrigin(info.origin),
+  });
   const broadcast = (msg: unknown) => {
     const data = JSON.stringify(msg);
     for (const client of wss.clients) {
@@ -182,8 +187,8 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
   const announceFocus = (ws: string) => broadcast({ type: "presence.focus", data: { ws, focus: focusRoster(ws) } });
   const isManaged = (ws: string, path: string): boolean => {
     const { ws: w, dirs } = ctx(ws);
-    const file = safeJoin(w.root, path);
-    return [dirs.inputs, dirs.prompts, dirs.context].some((d) => file.startsWith(d + sep));
+    const file = resolve(w.root, path); // resolve (not safeJoin) so traversal just reads as unmanaged
+    return [dirs.inputs, dirs.prompts, dirs.context].some((d) => isInside(d, file));
   };
   const leave = (socket: WebSocket) => {
     const st = sockState.get(socket);
@@ -235,6 +240,9 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
         if (st.focus) { st.focus = null; announceFocus(old); }
         st.ws = m.ws;
       } else if (m.type === "doc.open" && typeof m.path === "string") {
+        // only managed files (inputs/, prompts/, context/) can be opened — the
+        // same confinement the REST file API enforces
+        if (!isManaged(st.ws, m.path)) return;
         leave(socket);
         st.path = m.path;
         const k = dkey(st.ws, m.path);
@@ -280,6 +288,14 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
     const path = url.pathname;
     const method = req.method ?? "GET";
 
+    // CSRF guard: a state-changing request carrying a non-loopback Origin is a
+    // cross-site forgery from a page in the user's browser — refuse it. (GETs
+    // are protected by the same-origin policy: a cross-site page can't read the
+    // response without a CORS header, which we never send.)
+    if (method !== "GET" && method !== "HEAD" && !isAllowedOrigin(req.headers.origin)) {
+      return sendJson(res, 403, { error: "cross-origin request refused" });
+    }
+
     // --- API ---
     if (path.startsWith("/api/")) return api(req, res, url, method, broadcast);
 
@@ -293,7 +309,7 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
       const rel = (hasWs ? parts.slice(1).join("/") : parts.join("/")) || "index.html";
       const { store } = ctx(exWs);
       const file = join(store.exportsDir, rel);
-      if (existsSync(file) && file.startsWith(store.exportsDir) && statSync(file).isFile()) {
+      if (existsSync(file) && isInside(store.exportsDir, file) && statSync(file).isFile()) {
         res.writeHead(200, { "content-type": MIME[".html"] });
         return res.end(readFileSync(file));
       }
@@ -304,14 +320,16 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
     return serveStatic(path, res);
   }
 
-  await new Promise<void>((r) => server.listen(port, r));
+  await new Promise<void>((r) => server.listen(port, host, r));
   const addr = server.address();
   const boundPort = typeof addr === "object" && addr ? addr.port : port;
+  const lan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
   if (!quiet) {
     // eslint-disable-next-line no-console
     console.log(
       `\n  Loom UI running at http://localhost:${boundPort}` +
         (MOCK ? "  (mock mode — no API calls)" : "") +
+        (lan ? `\n  ⚠ bound to ${host} — reachable on your network; the file API has no auth` : "") +
         `\n  (Ctrl+C to stop)\n`,
     );
   }
@@ -320,7 +338,12 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const client of wss.clients) client.terminate();
-        wss.close(() => server.close((err) => (err ? reject(err) : resolve())));
+        wss.close(() => {
+          // Force-close any lingering sockets (e.g. a rejected cross-origin
+          // upgrade left a keep-alive connection) so close() can't hang.
+          server.closeAllConnections?.();
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
       }),
   };
 }
@@ -328,7 +351,7 @@ export async function startServer({ port = 4319, mock = false, quiet = false }: 
 function serveStatic(path: string, res: ServerResponse) {
   const rel = path === "/" ? "index.html" : path.replace(/^\//, "");
   const file = resolve(PUBLIC_DIR, rel);
-  if (!file.startsWith(PUBLIC_DIR) || !existsSync(file) || !statSync(file).isFile()) {
+  if (!isInside(PUBLIC_DIR, file) || !existsSync(file) || !statSync(file).isFile()) {
     // SPA fallback
     const index = join(PUBLIC_DIR, "index.html");
     if (existsSync(index)) {
@@ -449,20 +472,26 @@ async function api(
   }
 
   if (path === "/api/file" && method === "GET") {
-    const { ws } = ctx(wsId);
+    const { ws, dirs } = ctx(wsId);
     const rel = url.searchParams.get("path") ?? "";
-    const file = safeJoin(ws.root, rel);
-    if (!existsSync(file)) return sendJson(res, 404, { error: "not found" });
+    const file = resolve(ws.root, rel);
+    // reads are confined to the managed content dirs (same as writes), so the
+    // API can't be used to slurp .loom/ internals or arbitrary workspace files
+    const managed = [dirs.inputs, dirs.prompts, dirs.context];
+    if (!managed.some((d) => isInside(d, file))) {
+      return sendJson(res, 403, { error: "reads are only allowed under inputs/, prompts/, context/" });
+    }
+    if (!existsSync(file) || !statSync(file).isFile()) return sendJson(res, 404, { error: "not found" });
     return sendJson(res, 200, { path: rel, content: readFileSync(file, "utf8") });
   }
 
   if (path === "/api/file" && method === "PUT") {
     const { ws, dirs, store } = ctx(wsId);
     const body = JSON.parse(await readBody(req)) as { path: string; content: string };
-    const file = safeJoin(ws.root, body.path);
+    const file = resolve(ws.root, body.path);
     // Restrict writes to the managed content directories.
     const allowed = [dirs.inputs, dirs.prompts, dirs.context];
-    if (!allowed.some((d) => file === d || file.startsWith(d + sep))) {
+    if (!allowed.some((d) => isInside(d, file))) {
       return sendJson(res, 403, { error: "writes are only allowed under inputs/, prompts/, context/" });
     }
     const { writeFileSync, mkdirSync } = await import("node:fs");
@@ -476,9 +505,9 @@ async function api(
   if (path === "/api/file" && method === "DELETE") {
     const { ws, dirs, store } = ctx(wsId);
     const rel = url.searchParams.get("path") ?? "";
-    const file = safeJoin(ws.root, rel);
+    const file = resolve(ws.root, rel);
     const allowed = [dirs.inputs, dirs.prompts, dirs.context];
-    if (!allowed.some((d) => file.startsWith(d + sep))) {
+    if (!allowed.some((d) => isInside(d, file))) {
       return sendJson(res, 403, { error: "only files under inputs/, prompts/, context/ can be deleted" });
     }
     if (existsSync(file)) {
@@ -636,6 +665,27 @@ function safeJoin(root: string, rel: string): string {
     throw new Error("path escapes workspace");
   }
   return p;
+}
+
+/** True if `child` is `dir` itself or strictly contained in it (no sibling-prefix). */
+function isInside(dir: string, child: string): boolean {
+  return child === dir || child.startsWith(dir + sep);
+}
+
+/**
+ * Defend the local file API against malicious web pages (CSRF / cross-site
+ * WebSocket hijacking): a browser always sends an Origin on WS handshakes and
+ * on cross-site state-changing requests, so we only accept loopback origins.
+ * A missing Origin means a non-browser client (the CLI, tests) — allowed.
+ */
+function isAllowedOrigin(origin: string | undefined | null): boolean {
+  if (!origin) return true;
+  try {
+    const host = new URL(origin).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

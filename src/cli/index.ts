@@ -106,7 +106,7 @@ ${c.bold("Commands:")}
   export <workflow>        Write a shareable self-contained HTML file
   diff <workflow> <step>   Diff a step's current output vs its previous version
   workspace list|add|remove  Manage the multi-workspace registry
-  serve [--port 4319]      Launch the local web UI (--mock for offline demos)
+  serve [--port 4319]      Launch the local web UI (--mock offline; --host to expose on LAN)
   version                  Print version
 
 ${c.bold("Tip:")} run ${c.cyan("loom demo && loom serve --mock")} for a full, key-free walkthrough.
@@ -400,7 +400,9 @@ async function cmdWorkspace(positionals: string[], _flags: Record<string, string
 async function cmdServe(flags: Record<string, string | boolean>) {
   const { startServer } = await import("../server/server.js");
   const port = flags.port ? Number(flags.port) : 4319;
-  await startServer({ port, mock: mockEnabled(!!flags.mock) });
+  // Loopback by default; pass --host 0.0.0.0 to expose on the LAN (no auth!).
+  const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
+  await startServer({ port, host, mock: mockEnabled(!!flags.mock) });
 }
 
 main().catch((err) => {
