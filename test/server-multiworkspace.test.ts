@@ -84,9 +84,9 @@ test("/api/workspaces lists both, and /api/workspace is scoped by ?ws", async ()
     assert.equal(a.name, "alpha");
     assert.equal(b.name, "beta");
 
-    // an unknown workspace id is an error, not a silent default
+    // an unknown workspace id is a clean 400, not a silent default or a 500
     const bad = await fetch(`http://localhost:${port}/api/workspace?ws=nope-000000`);
-    assert.equal(bad.status, 500);
+    assert.equal(bad.status, 400);
   });
 });
 

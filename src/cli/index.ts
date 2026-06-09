@@ -214,7 +214,7 @@ function cmdStatus(workflow: string | undefined) {
   for (const id of targets) {
     console.log(c.bold(`\n${id}`));
     for (const s of engine.status(id)) {
-      const mark = s.fresh ? c.green("✓ fresh") : s.hasArtifact ? c.yellow("~ stale") : c.dim("· unbuilt");
+      const mark = s.fresh ? c.green("✓ fresh") : s.built ? c.yellow("~ stale") : c.dim("· unbuilt");
       console.log(`  ${mark}  ${s.stepId} ${c.dim(`(${s.type})`)}${s.note ? c.dim("  " + s.note) : ""}`);
     }
   }

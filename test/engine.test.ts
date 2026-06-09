@@ -85,6 +85,9 @@ test("editing an input invalidates the affected steps and creates a new version"
     const status = engine.status("brief");
     const outline = status.find((s) => s.stepId === "outline")!;
     assert.equal(outline.fresh, false, "outline is no longer fresh after its input changed");
+    // it was built once before, so it reads as *stale* (rebuildable), not *unbuilt*
+    assert.equal(outline.built, true, "a previously-built step stays 'built' after an input change");
+    assert.equal(outline.hasArtifact, false, "…even though the new content key isn't cached yet");
 
     const result = await engine.buildWorkflow("brief");
     assert.deepEqual(result.steps.map((s) => s.status), ["built", "built"]);

@@ -46,6 +46,7 @@ export interface StepStatus {
   type: Step["type"];
   fresh: boolean;
   hasArtifact: boolean;
+  built: boolean; // has this step ever produced an artifact (any version)?
   key?: string;
   note?: string;
 }
@@ -228,13 +229,17 @@ export class Engine {
       try {
         const { key } = this.prepare(workflowId, step, runOutputs);
         const hasArtifact = this.store.hasArtifact(key);
+        // "built" looks past the current content key to any prior version, so a
+        // step whose inputs changed reads as *stale* (rebuildable) rather than
+        // *unbuilt* (never run).
+        const built = hasArtifact || this.store.listStepArtifacts(workflowId, step.id).length > 0;
         const depsFresh = (step.inputs ?? [])
           .filter((r) => r.startsWith("step:"))
           .every((r) => freshById.get(r.slice("step:".length)) ?? false);
         const fresh = hasArtifact && depsFresh;
         freshById.set(step.id, fresh);
         if (hasArtifact) runOutputs.set(step.id, this.store.getArtifactContent(key));
-        out.push({ stepId: step.id, type: step.type, fresh, hasArtifact, key });
+        out.push({ stepId: step.id, type: step.type, fresh, hasArtifact, built, key });
       } catch (err) {
         freshById.set(step.id, false);
         out.push({
@@ -242,6 +247,7 @@ export class Engine {
           type: step.type,
           fresh: false,
           hasArtifact: false,
+          built: false,
           note: err instanceof Error ? err.message : String(err),
         });
       }

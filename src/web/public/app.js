@@ -331,7 +331,11 @@ async function switchWorkspace(id) {
   if (!id || id === currentWs) return;
   closeActiveDoc();
   setFocus(null);
+  // reset all DAG visual state so a step key shared between workspaces (e.g.
+  // two "brief::outline"s) can't carry the old workspace's color or selection.
   dag.focusList = [];
+  dag.stateByKey.clear();
+  dag.selectedKey = null;
   currentWs = id;
   collab.wsId = id;
   sendCollab({ type: "ws.select", ws: id }); // move our presence to the new workspace
@@ -486,7 +490,7 @@ async function refreshStatuses() {
       const { status } = await api.get(`/api/status?workflow=${encodeURIComponent(wf.id)}`);
       statusMaps[wf.id] = Object.fromEntries(status.map((s) => [s.stepId, s]));
       for (const s of status) {
-        const state = s.fresh ? "fresh" : s.hasArtifact ? "stale" : "unbuilt";
+        const state = s.fresh ? "fresh" : s.built ? "stale" : "unbuilt";
         const key = `${wf.id}::${s.stepId}`;
         if (dag.stateByKey.get(key) !== "building") applyNodeState(key, state);
       }
