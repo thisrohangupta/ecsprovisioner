@@ -42,6 +42,33 @@ export class CRDT {
     for (const n of nodes) if (n.del) this._applyDelete(n.id);
   }
 
+  // Anchor for a caret at `index`: id of the visible char before it (null = doc start).
+  anchorAt(index) {
+    const vis = this._visible();
+    if (index <= 0 || vis.length === 0) return null;
+    return vis[Math.min(index, vis.length) - 1].id;
+  }
+
+  // Resolve an anchor to a caret index. Tombstoned anchors collapse to where
+  // the char used to be; unknown anchors return -1.
+  indexOfAnchor(anchor) {
+    if (!anchor) return 0;
+    if (!this.byKey.has(keyOf(anchor))) return -1;
+    const target = keyOf(anchor);
+    let count = 0;
+    let found = -1;
+    const walk = (n) => {
+      if (found >= 0) return;
+      if (n.id) {
+        if (!n.del) count++;
+        if (keyOf(n.id) === target) { found = count; return; }
+      }
+      for (const c of n.children) { walk(c); if (found >= 0) return; }
+    };
+    for (const c of this.root.children) { walk(c); if (found >= 0) break; }
+    return found >= 0 ? found : -1;
+  }
+
   localInsert(index, ch) {
     const vis = this._visible();
     const origin = index <= 0 ? null : vis[index - 1].id;

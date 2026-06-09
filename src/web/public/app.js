@@ -144,6 +144,7 @@ const collab = {
   onSnapshot: null,
   onOps: null,
   onPresence: null,
+  onCursors: null,
 };
 
 function sendCollab(obj) {
@@ -153,13 +154,14 @@ function closeActiveDoc() {
   if (collab.activePath) sendCollab({ type: "doc.close", path: collab.activePath });
   collab.activePath = null;
   collab.doc = null;
-  collab.onSnapshot = collab.onOps = collab.onPresence = null;
+  collab.onSnapshot = collab.onOps = collab.onPresence = collab.onCursors = null;
 }
 function handleCollab(m) {
   if (m.data.path !== collab.activePath) return;
   if (m.type === "doc.snapshot") collab.onSnapshot?.(m.data);
   else if (m.type === "doc.ops") { if (m.data.by !== collab.clientId) collab.onOps?.(m.data); }
   else if (m.type === "presence") collab.onPresence?.(m.data.users);
+  else if (m.type === "doc.cursors") collab.onCursors?.(m.data.cursors);
 }
 function initials(name) {
   return (name || "?").trim().slice(0, 2).toUpperCase();
@@ -188,7 +190,7 @@ function connectWS() {
       if (collab.activePath) sendCollab({ type: "doc.open", path: collab.activePath });
       return;
     }
-    if (m.type === "doc.snapshot" || m.type === "doc.ops" || m.type === "presence") return handleCollab(m);
+    if (m.type === "doc.snapshot" || m.type === "doc.ops" || m.type === "presence" || m.type === "doc.cursors") return handleCollab(m);
     handleEvent(m);
   };
 }
@@ -716,17 +718,72 @@ function renderFileEditor(title, items, dir, rerender) {
     try { await api.put("/api/file", { path: currentPath, content: textarea.value }); toast("Published"); }
     catch (err) { toast(err.message); }
   };
+  // remote carets render in an overlay; a hidden mirror div (same metrics as
+  // the textarea) measures where a character index lands in pixels
+  const cursorLayer = el("div", { class: "cursor-layer" });
+  const mirror = el("div", { class: "editor-mirror" });
+  const editorWrap = el("div", { class: "editor-wrap" }, textarea, cursorLayer, mirror);
   editorCard.append(
     el("div", { class: "row" }, fileLabel, el("span", { class: "spacer" }), youChip, presenceEl, saveBtn),
-    textarea,
+    editorWrap,
   );
+
+  // ---- CRDT-aware remote cursors ----
+  // Each peer's caret is anchored to the CRDT id of the character before it
+  // (not a plain index), so as concurrent edits land we re-resolve the anchor
+  // against our replica and the caret stays on the right character.
+  let remoteCursors = []; // [{ id, name, color, anchor }]
+  const renderRemoteCursors = () => {
+    cursorLayer.replaceChildren();
+    if (!collab.doc || collab.activePath !== currentPath) return;
+    const others = remoteCursors.filter((c) => c.id !== collab.clientId);
+    if (!others.length) return;
+    const cs = getComputedStyle(textarea);
+    for (const p of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
+      "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]) mirror.style[p] = cs[p];
+    mirror.style.width = `${textarea.clientWidth}px`;
+    const text = textarea.value;
+    const lineH = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4 || 16;
+    for (const c of others) {
+      const idx = collab.doc.indexOfAnchor(c.anchor ?? null);
+      if (idx < 0) continue; // anchor op hasn't reached us yet
+      mirror.textContent = text.slice(0, Math.min(idx, text.length));
+      const marker = el("span", {}, "\u200b"); // zero-width space marks the caret cell
+      mirror.append(marker);
+      const top = marker.offsetTop + 1 - textarea.scrollTop;
+      const left = marker.offsetLeft + 1 - textarea.scrollLeft;
+      if (top < -lineH || top > textarea.clientHeight) continue; // out of view
+      cursorLayer.append(el("span", {
+        class: "rcursor",
+        style: `left:${left}px; top:${top}px; height:${lineH}px; --ccolor:${c.color}`,
+      }, el("span", { class: "flag" }, c.name)));
+    }
+    mirror.textContent = "";
+  };
+  let lastSentAnchor = "?";
+  const sendCursor = () => {
+    if (!collab.doc || collab.activePath !== currentPath) return;
+    const anchor = collab.doc.anchorAt(textarea.selectionStart);
+    const key = anchor ? `${anchor.c}:${anchor.s}` : "start";
+    if (key === lastSentAnchor) return; // dedupe — only broadcast real moves
+    lastSentAnchor = key;
+    sendCollab({ type: "cursor", path: currentPath, anchor });
+  };
+  let cursorTimer = null;
+  const queueCursor = () => { clearTimeout(cursorTimer); cursorTimer = setTimeout(sendCursor, 80); };
+  for (const evt of ["keyup", "click", "select", "focus"]) textarea.addEventListener(evt, queueCursor);
+  textarea.addEventListener("scroll", renderRemoteCursors);
 
   // local edits → derive CRDT ops vs. last reconciled text → broadcast
   const pushLocalEdits = () => {
     if (!collab.doc || collab.activePath !== currentPath) return;
     const ops = editsFromDiff(collab.doc, collab.lastText, textarea.value);
     collab.lastText = textarea.value;
-    if (ops.length) sendCollab({ type: "doc.ops", path: currentPath, ops });
+    if (ops.length) {
+      sendCollab({ type: "doc.ops", path: currentPath, ops });
+      sendCursor();          // our edits moved our caret
+      renderRemoteCursors(); // …and shifted where peers' anchors resolve
+    }
   };
   let editTimer = null;
   textarea.addEventListener("input", () => {
@@ -743,6 +800,7 @@ function renderFileEditor(title, items, dir, rerender) {
     collab.lastText = content;
     const p = atEnd ? content.length : Math.min(pos, content.length);
     textarea.selectionStart = textarea.selectionEnd = p;
+    renderRemoteCursors(); // anchors re-resolve against the updated text
   };
   const renderPresence = (users) => {
     const others = users.filter((u) => u.id !== collab.clientId);
@@ -757,6 +815,9 @@ function renderFileEditor(title, items, dir, rerender) {
     currentPath = relPath;
     fileLabel.textContent = relPath;
     editorCard.style.display = "block";
+    remoteCursors = [];
+    lastSentAnchor = "?";
+    cursorLayer.replaceChildren();
     // join the collaborative session; the server replies with a CRDT snapshot
     collab.activePath = relPath;
     collab.onSnapshot = (d) => {
@@ -774,6 +835,10 @@ function renderFileEditor(title, items, dir, rerender) {
       applyRemoteText(collab.doc.value());
     };
     collab.onPresence = renderPresence;
+    collab.onCursors = (cursors) => {
+      remoteCursors = cursors || [];
+      renderRemoteCursors();
+    };
     sendCollab({ type: "doc.open", path: relPath });
   };
 

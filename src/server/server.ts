@@ -79,6 +79,10 @@ export async function startServer({ port = 4319, mock = false }: { port?: number
     id: string;
     user: CollabUser;
     path: string | null;
+    // caret anchor = CRDT id of the char before the caret (null = doc start).
+    // The server never interprets it; it just relays so peers can resolve it
+    // against their own replica (edit-stable, unlike a plain index).
+    cursor: unknown;
   }
   const docs = new Map<string, CRDT>();
   const presence = new Map<string, Map<string, CollabUser>>();
@@ -105,6 +109,16 @@ export async function startServer({ port = 4319, mock = false }: { port?: number
   const usersOn = (path: string): CollabUser[] => [...(presence.get(path)?.values() ?? [])];
   const announce = (path: string) =>
     broadcast({ type: "presence", data: { path, users: usersOn(path) } });
+  const cursorsOn = (path: string) => {
+    const out: Array<{ id: string; name: string; color: string; anchor: unknown }> = [];
+    for (const client of wss.clients) {
+      const s = sockState.get(client);
+      if (s && s.path === path) out.push({ id: s.id, name: s.user.name, color: s.user.color, anchor: s.cursor });
+    }
+    return out;
+  };
+  const announceCursors = (path: string) =>
+    broadcast({ type: "doc.cursors", data: { path, cursors: cursorsOn(path) } });
   const isManaged = (path: string): boolean => {
     const { ws, dirs } = ctx();
     const file = safeJoin(ws.root, path);
@@ -113,16 +127,22 @@ export async function startServer({ port = 4319, mock = false }: { port?: number
   const leave = (socket: WebSocket) => {
     const st = sockState.get(socket);
     if (st?.path && presence.has(st.path)) {
-      presence.get(st.path)!.delete(st.id);
-      announce(st.path);
+      const path = st.path;
+      presence.get(path)!.delete(st.id);
+      st.path = null;
+      st.cursor = null;
+      announce(path);
+      announceCursors(path); // drop their caret from peers' editors
+    } else if (st) {
+      st.path = null;
+      st.cursor = null;
     }
-    if (st) st.path = null;
   };
 
   wss.on("connection", (socket) => {
     const site = nextId++;
     const id = `c${site}`;
-    sockState.set(socket, { id, user: { id, name: "Guest", color: "#888" }, path: null });
+    sockState.set(socket, { id, user: { id, name: "Guest", color: "#888" }, path: null, cursor: null });
     socket.send(JSON.stringify({ type: "hello", clientId: id, site, ts: new Date().toISOString() }));
 
     socket.on("message", (raw) => {
@@ -146,6 +166,7 @@ export async function startServer({ port = 4319, mock = false }: { port?: number
         const doc = loadDoc(m.path);
         socket.send(JSON.stringify({ type: "doc.snapshot", data: { path: m.path, nodes: doc.snapshot() } }));
         announce(m.path);
+        announceCursors(m.path); // bring the new joiner up to date on carets
       } else if (m.type === "doc.close") {
         leave(socket);
       } else if (m.type === "doc.ops" && typeof m.path === "string" && Array.isArray(m.ops)) {
@@ -155,6 +176,10 @@ export async function startServer({ port = 4319, mock = false }: { port?: number
         persist(m.path, doc);
         // relay to everyone else editing this file
         broadcast({ type: "doc.ops", data: { path: m.path, ops: m.ops, by: st.id } });
+      } else if (m.type === "cursor" && typeof m.path === "string" && st.path === m.path) {
+        // anchor is opaque to the server — peers resolve it via their CRDT
+        st.cursor = m.anchor ?? null;
+        announceCursors(m.path);
       }
     });
 
