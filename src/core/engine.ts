@@ -50,12 +50,23 @@ export interface StepStatus {
   note?: string;
 }
 
+/** The two step kinds the engine knows how to run. Injectable for testing. */
+export interface StepRunners {
+  inference: typeof runInference;
+  agent: typeof runAgent;
+}
+
 export class Engine {
+  private runners: StepRunners;
+
   constructor(
     private ws: Workspace,
     private dirs: ResolvedDirs,
     private store: Store,
-  ) {}
+    runners?: Partial<StepRunners>,
+  ) {
+    this.runners = { inference: runInference, agent: runAgent, ...runners };
+  }
 
   private emit(opts: BuildOptions, type: LoomEvent["type"], data: Record<string, unknown>): void {
     const event = this.store.appendEvent(type, data, opts.actor);
@@ -129,7 +140,7 @@ export class Engine {
         let content = "";
         let usage;
         if (step.type === "inference") {
-          const res = await runInference({
+          const res = await this.runners.inference({
             model,
             system: INFERENCE_SYSTEM,
             prompt: rendered,
@@ -142,7 +153,7 @@ export class Engine {
         } else {
           const cwd = resolve(this.ws.root, step.agentDir ?? ".");
           mkdirSync(cwd, { recursive: true });
-          const res = await runAgent({
+          const res = await this.runners.agent({
             model,
             cwd,
             systemPrompt: AGENT_SYSTEM,

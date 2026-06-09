@@ -1,5 +1,7 @@
 # Loom
 
+[![CI](https://github.com/thisrohangupta/ecsprovisioner/actions/workflows/ci.yml/badge.svg)](https://github.com/thisrohangupta/ecsprovisioner/actions/workflows/ci.yml)
+
 **A local-first build system for LLM workflows — `make` for prompts, agents, and context.**
 
 Many projects have this shape: *there's a pile of source material you want to
@@ -25,10 +27,27 @@ inputs/ + context/ + prompts/  ──▶  workflow (DAG of steps)  ──▶  ar
 - **Compiled outputs, like `make`.** Each step is content-hashed over its inputs
   + prompt + model; unchanged steps are **never recomputed**. Every artifact
   carries provenance (inputs, model, tokens, cost, time).
-- **Shareable results.** Export any workflow to a self-contained HTML page.
-- **Versioned & collaborative.** Git snapshots today; the data model (an
-  append-only event log + a live WebSocket layer) is built so real-time
-  multiplayer can be layered on without a rewrite.
+- **Shareable results.** Export any workflow — or the whole workspace as one
+  linked index — to self-contained HTML you can open offline, email, or host.
+- **Real-time & versioned.** Live multi-user editing with presence (open the
+  same input in two windows and watch edits + avatars sync), plus git snapshots
+  for history. Built on an append-only event log so conflict-free (CRDT)
+  co-editing can be layered on next.
+
+## Try it in 10 seconds (no API key)
+
+```bash
+npm install && npm run build
+mkdir demo && cd demo
+node ../dist/cli/index.js demo          # scaffolds + builds a full pipeline offline
+node ../dist/cli/index.js serve --mock  # open http://localhost:4319
+```
+
+`demo` builds a believable product pipeline — **research → analysis → PRD → launch
+blog → a coding-agent that ships a landing page** — using a deterministic **mock
+provider**, so the whole product (DAG, caching, diffs, cost dashboard, sharing)
+is demoable with zero setup. Rebuild and watch every step go *cached*; the
+**Metrics** tab shows the model spend you just avoided.
 
 ## Install
 
@@ -131,12 +150,14 @@ hashes + model + step config. On build:
 | Command | What it does |
 | --- | --- |
 | `loom init [name]` | Scaffold a new workspace |
-| `loom build [workflow]` | Build a workflow (or all). `--force`, `--all` |
+| `loom demo [name]` | Scaffold + build a rich demo workspace offline (mock) |
+| `loom build [workflow]` | Build a workflow (or all). `--force`, `--all`, `--mock` |
 | `loom status [workflow]` | Fresh / stale / unbuilt per step |
+| `loom stats` | Tokens, cost, and **$ saved by caching** |
 | `loom ls` | List workflows and their step DAG |
 | `loom prompts` | List the prompt library |
 | `loom snapshot -m "msg"` | Commit a git snapshot · `loom snapshot list` |
-| `loom export <workflow>` | Write a shareable self-contained HTML file |
+| `loom export [workflow]` | Write shareable HTML (no arg = every workflow + an index) |
 | `loom diff <workflow> <step>` | Diff a step's current output vs its previous version (`--from`, `--to`) |
 | `loom serve [--port 4319]` | Launch the local web UI with live updates |
 
@@ -151,12 +172,19 @@ hashes + model + step config. On build:
   - **Diff** — pick any two versions of that step's output and see a
     line-level diff (with collapsed unchanged context). Versions accumulate as
     you change inputs/prompts and rebuild.
-  Build/rebuild stream a live log; one-click HTML export.
-- **Inputs / Prompts** — browse and edit managed files; saves broadcast to all
-  connected clients over WebSocket (the first step toward live collaboration).
+  Build/rebuild stream a live log; one-click HTML export. **Author right here:**
+  create a new workflow, add steps with a form, or edit `loom.yaml` directly
+  (validated on save).
+- **Metrics** — tokens, model spend, and the headline **$ saved by caching**,
+  refreshed live as you build.
+- **Inputs / Context / Prompts** — browse, **create**, edit, and delete managed
+  files, with **live collaborative editing**: edits sync across clients in real
+  time and presence avatars show who else is in the file.
 - **Artifacts** — every compiled output with full provenance, plus a
   "diff vs previous" button per artifact.
 - **Snapshots** — create and browse git snapshots.
+- **Share** — export a workflow or the whole workspace to self-contained HTML;
+  copy a link, open, or download to send externally.
 
 ## Layout under `.loom/`
 
@@ -171,10 +199,11 @@ hashes + model + step config. On build:
 
 ## Roadmap (staged)
 
-- **Now:** git-backed snapshots; live WebSocket updates across clients;
-  interactive DAG view; per-artifact version history and diffs.
-- **Next:** CRDT/Yjs co-editing layered over the event log; remote sharing of
-  exports; diffing across snapshots.
+- **Now:** git snapshots; interactive DAG view; per-artifact history + diffs;
+  cost/cache-savings metrics; in-UI authoring; **live collaborative editing with
+  presence**; offline mock provider + one-command demo.
+- **Next:** conflict-free (CRDT/Yjs) concurrent editing layered over the event
+  log; remote sharing of exports; diffing across snapshots.
 
 ## Tech
 
@@ -184,6 +213,20 @@ headless). `yaml` for config, `ws` for live updates. No database — just files.
 
 > The Anthropic SDKs are pinned to `latest` since they move quickly; pin exact
 > versions in `package.json` if you need reproducible installs.
+
+## Development
+
+```bash
+npm run typecheck     # tsc --noEmit over src/
+npm run build         # compile + copy web assets
+npm test              # node:test suite (via tsx) — no API key needed
+```
+
+Tests live in `test/` and run on Node's built-in test runner. The engine accepts
+injectable step runners (`new Engine(ws, dirs, store, { inference, agent })`), so
+the full build → cache → rebuild → diff flow is tested deterministically without
+calling a model. **CI** (GitHub Actions) runs typecheck + build + tests on Node 20
+and 22 for every push and pull request.
 
 ## License
 

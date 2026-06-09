@@ -44,7 +44,7 @@ export function loadWorkspace(start: string = process.cwd()): Workspace {
   const config = configPath.endsWith(".json")
     ? (JSON.parse(raw) as WorkspaceConfig)
     : (YAML.parse(raw) as WorkspaceConfig);
-  validateConfig(config);
+  validateWorkspaceConfig(config);
   return { root, configPath, config };
 }
 
@@ -53,6 +53,23 @@ export function saveConfig(ws: Workspace): void {
     ? JSON.stringify(ws.config, null, 2)
     : YAML.stringify(ws.config);
   writeFileSync(ws.configPath, raw);
+}
+
+/** Validate then persist a full config object to the workspace's config file. */
+export function writeConfig(ws: Workspace, config: WorkspaceConfig): void {
+  validateWorkspaceConfig(config);
+  const raw = ws.configPath.endsWith(".json")
+    ? JSON.stringify(config, null, 2)
+    : YAML.stringify(config);
+  writeFileSync(ws.configPath, raw);
+}
+
+/** Validate raw config text (yaml/json) then write it verbatim, preserving format. */
+export function writeConfigRaw(ws: Workspace, raw: string): WorkspaceConfig {
+  const parsed = (ws.configPath.endsWith(".json") ? JSON.parse(raw) : YAML.parse(raw)) as WorkspaceConfig;
+  validateWorkspaceConfig(parsed);
+  writeFileSync(ws.configPath, raw);
+  return parsed;
 }
 
 export function resolveDirs(ws: Workspace): ResolvedDirs {
@@ -69,7 +86,11 @@ export function defaultModel(ws: Workspace): string {
   return ws.config.defaultModel ?? "claude-opus-4-8";
 }
 
-function validateConfig(config: WorkspaceConfig): void {
+/**
+ * Validate a workspace config (used on load and before any config write so the
+ * UI/CLI can never persist a broken loom.yaml). Throws with a human message.
+ */
+export function validateWorkspaceConfig(config: WorkspaceConfig): void {
   if (!config || typeof config !== "object") throw new Error("Invalid loom config: not an object.");
   if (!config.name) throw new Error("Invalid loom config: missing `name`.");
   if (!Array.isArray(config.workflows)) {

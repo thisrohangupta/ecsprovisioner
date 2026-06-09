@@ -1,17 +1,27 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile, readFileSync, existsSync, statSync } from "node:fs";
+import { readFile, readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve, extname, sep } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
-import { loadWorkspace, resolveDirs, type Workspace, type ResolvedDirs, defaultModel } from "../core/workspace.js";
+import {
+  loadWorkspace,
+  resolveDirs,
+  writeConfig,
+  writeConfigRaw,
+  type Workspace,
+  type ResolvedDirs,
+  defaultModel,
+} from "../core/workspace.js";
 import { Store } from "../core/store.js";
 import { Engine } from "../core/engine.js";
 import { listPrompts } from "../core/prompts.js";
 import { dagEdges } from "../core/graph.js";
 import { snapshot as gitSnapshot, listSnapshots } from "../core/snapshot.js";
-import { exportWorkflowHtml } from "../core/exporter.js";
+import { exportWorkflowHtml, exportAllHtml } from "../core/exporter.js";
 import { listFilesRecursive } from "../core/workspace.js";
 import { diffLines, diffStats } from "../core/diff.js";
+import { selectRunners } from "../llm/runners.js";
+import { computeMetrics } from "../core/metrics.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, "../web/public");
@@ -31,15 +41,18 @@ interface Ctx {
   engine: Engine;
 }
 
+let MOCK = false;
+
 function ctx(): Ctx {
   const ws = loadWorkspace();
   const dirs = resolveDirs(ws);
   const store = new Store(dirs.loom);
   store.init();
-  return { ws, dirs, store, engine: new Engine(ws, dirs, store) };
+  return { ws, dirs, store, engine: new Engine(ws, dirs, store, selectRunners(MOCK)) };
 }
 
-export async function startServer({ port = 4319 }: { port?: number } = {}): Promise<void> {
+export async function startServer({ port = 4319, mock = false }: { port?: number; mock?: boolean } = {}): Promise<void> {
+  MOCK = mock;
   // Validate there is a workspace before binding.
   ctx();
 
@@ -54,8 +67,90 @@ export async function startServer({ port = 4319 }: { port?: number } = {}): Prom
       if (client.readyState === WebSocket.OPEN) client.send(data);
     }
   };
+
+  // --- live collaboration (LWW content sync + presence), keyed by file path ---
+  interface CollabUser {
+    id: string;
+    name: string;
+    color: string;
+  }
+  interface SocketState {
+    id: string;
+    user: CollabUser;
+    path: string | null;
+  }
+  const docs = new Map<string, { version: number; content: string }>();
+  const presence = new Map<string, Map<string, CollabUser>>();
+  const sockState = new WeakMap<WebSocket, SocketState>();
+  let nextId = 1;
+
+  const loadDoc = (path: string) => {
+    if (!docs.has(path)) {
+      const { ws } = ctx();
+      const abs = safeJoin(ws.root, path);
+      docs.set(path, { version: 1, content: existsSync(abs) ? readFileSync(abs, "utf8") : "" });
+    }
+    return docs.get(path)!;
+  };
+  const usersOn = (path: string): CollabUser[] => [...(presence.get(path)?.values() ?? [])];
+  const announce = (path: string) =>
+    broadcast({ type: "presence", data: { path, users: usersOn(path) } });
+  const isManaged = (path: string): boolean => {
+    const { ws, dirs } = ctx();
+    const file = safeJoin(ws.root, path);
+    return [dirs.inputs, dirs.prompts, dirs.context].some((d) => file.startsWith(d + sep));
+  };
+  const leave = (socket: WebSocket) => {
+    const st = sockState.get(socket);
+    if (st?.path && presence.has(st.path)) {
+      presence.get(st.path)!.delete(st.id);
+      announce(st.path);
+    }
+    if (st) st.path = null;
+  };
+
   wss.on("connection", (socket) => {
-    socket.send(JSON.stringify({ type: "hello", ts: new Date().toISOString() }));
+    const id = `c${nextId++}`;
+    sockState.set(socket, { id, user: { id, name: "Guest", color: "#888" }, path: null });
+    socket.send(JSON.stringify({ type: "hello", clientId: id, ts: new Date().toISOString() }));
+
+    socket.on("message", (raw) => {
+      let m: Record<string, unknown>;
+      try {
+        m = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const st = sockState.get(socket);
+      if (!st) return;
+
+      if (m.type === "identify") {
+        st.user = { id: st.id, name: String(m.name ?? "Guest").slice(0, 40), color: String(m.color ?? "#888") };
+        if (st.path) announce(st.path);
+      } else if (m.type === "doc.open" && typeof m.path === "string") {
+        leave(socket);
+        st.path = m.path;
+        if (!presence.has(m.path)) presence.set(m.path, new Map());
+        presence.get(m.path)!.set(st.id, st.user);
+        const doc = loadDoc(m.path);
+        socket.send(JSON.stringify({ type: "doc.state", data: { path: m.path, content: doc.content, version: doc.version } }));
+        announce(m.path);
+      } else if (m.type === "doc.close") {
+        leave(socket);
+      } else if (m.type === "doc.edit" && typeof m.path === "string" && typeof m.content === "string") {
+        if (!isManaged(m.path)) return;
+        const doc = loadDoc(m.path);
+        doc.content = m.content;
+        doc.version++;
+        const { ws } = ctx();
+        const abs = safeJoin(ws.root, m.path);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, m.content);
+        broadcast({ type: "doc.update", data: { path: m.path, content: m.content, version: doc.version, by: st.id } });
+      }
+    });
+
+    socket.on("close", () => leave(socket));
   });
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -69,8 +164,9 @@ export async function startServer({ port = 4319 }: { port?: number } = {}): Prom
     // --- exported HTML ---
     if (path.startsWith("/export/")) {
       const { store } = ctx();
-      const file = join(store.exportsDir, path.slice("/export/".length));
-      if (existsSync(file) && file.startsWith(store.exportsDir)) {
+      const rel = path.slice("/export/".length) || "index.html";
+      const file = join(store.exportsDir, rel);
+      if (existsSync(file) && file.startsWith(store.exportsDir) && statSync(file).isFile()) {
         res.writeHead(200, { "content-type": MIME[".html"] });
         return res.end(readFileSync(file));
       }
@@ -83,7 +179,11 @@ export async function startServer({ port = 4319 }: { port?: number } = {}): Prom
 
   await new Promise<void>((r) => server.listen(port, r));
   // eslint-disable-next-line no-console
-  console.log(`\n  Loom UI running at http://localhost:${port}\n  (Ctrl+C to stop)\n`);
+  console.log(
+    `\n  Loom UI running at http://localhost:${port}` +
+      (MOCK ? "  (mock mode — no API calls)" : "") +
+      `\n  (Ctrl+C to stop)\n`,
+  );
 }
 
 function serveStatic(path: string, res: ServerResponse) {
@@ -133,6 +233,7 @@ async function api(
       description: ws.config.description,
       root: ws.root,
       defaultModel: defaultModel(ws),
+      mock: MOCK,
       workflows,
       state: store.readState(),
     });
@@ -148,6 +249,31 @@ async function api(
   if (path === "/api/prompts" && method === "GET") {
     const { dirs } = ctx();
     return sendJson(res, 200, { prompts: listPrompts(dirs).map((p) => ({ name: p.name, content: p.content })) });
+  }
+
+  if (path === "/api/context" && method === "GET") {
+    const { dirs } = ctx();
+    const rel = dirs.context.split(sep).pop() ?? "context";
+    const files = listFilesRecursive(dirs.context).map((f) => `${rel}/${f}`);
+    return sendJson(res, 200, { files, dir: rel });
+  }
+
+  if (path === "/api/config" && method === "GET") {
+    const { ws } = ctx();
+    return sendJson(res, 200, { config: ws.config, raw: readFileSync(ws.configPath, "utf8") });
+  }
+
+  if (path === "/api/config" && method === "PUT") {
+    const { ws, store } = ctx();
+    const body = JSON.parse(await readBody(req)) as { config?: unknown; raw?: string };
+    try {
+      if (typeof body.raw === "string") writeConfigRaw(ws, body.raw);
+      else writeConfig(ws, body.config as never);
+    } catch (err) {
+      return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+    broadcast(store.appendEvent("file.changed", { path: "loom.yaml" }));
+    return sendJson(res, 200, { ok: true });
   }
 
   if (path === "/api/file" && method === "GET") {
@@ -172,6 +298,22 @@ async function api(
     writeFileSync(file, body.content);
     const event = store.appendEvent("file.changed", { path: body.path });
     broadcast(event);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (path === "/api/file" && method === "DELETE") {
+    const { ws, dirs, store } = ctx();
+    const rel = url.searchParams.get("path") ?? "";
+    const file = safeJoin(ws.root, rel);
+    const allowed = [dirs.inputs, dirs.prompts, dirs.context];
+    if (!allowed.some((d) => file.startsWith(d + sep))) {
+      return sendJson(res, 403, { error: "only files under inputs/, prompts/, context/ can be deleted" });
+    }
+    if (existsSync(file)) {
+      const { rmSync } = await import("node:fs");
+      rmSync(file);
+    }
+    broadcast(store.appendEvent("file.changed", { path: rel, deleted: true }));
     return sendJson(res, 200, { ok: true });
   }
 
@@ -236,6 +378,11 @@ async function api(
     return sendJson(res, 200, { status: engine.status(workflow) });
   }
 
+  if (path === "/api/metrics" && method === "GET") {
+    const { store } = ctx();
+    return sendJson(res, 200, { metrics: computeMetrics(store), mock: MOCK });
+  }
+
   if (path === "/api/events" && method === "GET") {
     const { store } = ctx();
     const limit = Number(url.searchParams.get("limit") ?? "100");
@@ -274,6 +421,13 @@ async function api(
     const { path: filePath } = exportWorkflowHtml(ws, store, body.workflow);
     broadcast(store.appendEvent("export", { workflowId: body.workflow, path: filePath }));
     return sendJson(res, 200, { path: filePath, url: `/export/${body.workflow}.html` });
+  }
+
+  if (path === "/api/export-all" && method === "POST") {
+    const { ws, store } = ctx();
+    const { indexPath, pages } = exportAllHtml(ws, store);
+    broadcast(store.appendEvent("export", { workflowId: "*", path: indexPath }));
+    return sendJson(res, 200, { indexPath, indexUrl: "/export/index.html", pages });
   }
 
   return sendJson(res, 404, { error: "unknown endpoint" });

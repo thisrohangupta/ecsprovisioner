@@ -18,6 +18,7 @@
     "copy:web": "node -e \"const fs=require('fs');fs.cpSync('src/web/public','dist/web/public',{recursive:true})\"",
     "dev": "tsx src/cli/index.ts",
     "loom": "tsx src/cli/index.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build"
   },
