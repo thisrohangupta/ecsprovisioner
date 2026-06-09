@@ -18,3 +18,8 @@ export { exportWorkflowHtml } from "./core/exporter.js";
 export { renderMarkdown } from "./core/markdown.js";
 export { diffLines, diffStats } from "./core/diff.js";
 export type { DiffOp, DiffOpType, DiffStats } from "./core/diff.js";
+export { computeMetrics } from "./core/metrics.js";
+export type { Metrics } from "./core/metrics.js";
+export { scaffoldDemo } from "./core/scaffold.js";
+export { mockRunners, mockInference, mockAgent } from "./llm/mock.js";
+export { selectRunners, mockEnabled } from "./llm/runners.js";

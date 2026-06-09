@@ -172,6 +172,7 @@ function handleEvent(e) {
       logSink?.(e.data.ok ? `\nbuild complete\n` : `\nbuild failed at ${e.data.failedAt}\n`, e.data.ok ? "ok" : "err");
       pushActivity(`build <b>${e.data.workflowId}</b> ${e.data.ok ? "done" : "failed"}`);
       if (view === "workflows") refreshStatuses();
+      if (view === "metrics") renderMetrics();
       break;
     case "file.changed":
       pushActivity(`edited <b>${e.data.path}</b>`);
@@ -204,6 +205,9 @@ async function boot() {
   workspace = await api.get("/api/workspace");
   document.getElementById("ws-name").textContent = workspace.name;
   document.getElementById("ws-desc").textContent = workspace.description || "";
+  if (workspace.mock && !document.querySelector(".mockpill")) {
+    document.querySelector(".brand > div").append(el("span", { class: "mockpill" }, "mock"));
+  }
   const events = await api.get("/api/events?limit=20").catch(() => ({ events: [] }));
   events.events.reverse().forEach((e) => handleEvent(e));
   connectWS();
@@ -213,6 +217,7 @@ async function boot() {
 async function render() {
   workspace = await api.get("/api/workspace");
   if (view === "workflows") return renderWorkflows();
+  if (view === "metrics") return renderMetrics();
   if (view === "inputs") return renderInputs();
   if (view === "prompts") return renderPrompts();
   if (view === "artifacts") return renderArtifacts();
@@ -594,6 +599,35 @@ async function renderArtifacts() {
     );
   }
   main.append(detail);
+}
+
+async function renderMetrics() {
+  const { metrics: m, mock } = await api.get("/api/metrics");
+  main.replaceChildren(el("h1", { class: "page" }, "Metrics"));
+  if (mock) {
+    main.append(el("div", { class: "banner" },
+      "Mock mode — outputs are synthesized offline and costs are modeled estimates."));
+  }
+  const usd = (n) => `$${n.toFixed(4)}`;
+  const stat = (label, value, sub, cls) =>
+    el("div", { class: `stat ${cls || ""}` },
+      el("div", { class: "stat-val" }, value),
+      el("div", { class: "stat-label" }, label),
+      sub ? el("div", { class: "stat-sub" }, sub) : null);
+
+  main.append(
+    el("div", { class: "stats-grid" },
+      stat("Saved by caching", usd(m.savedUsd), `${m.cacheHits} cache hit${m.cacheHits === 1 ? "" : "s"}`, "good"),
+      stat("Spent on model calls", usd(m.spentUsd), `${m.modelCalls} call${m.modelCalls === 1 ? "" : "s"}`),
+      stat("Cache hit rate", `${Math.round(m.cacheHitRate * 100)}%`),
+      stat("Tokens", (m.tokensIn + m.tokensOut).toLocaleString(),
+        `${m.tokensIn.toLocaleString()} in / ${m.tokensOut.toLocaleString()} out`),
+      stat("Artifacts", String(m.artifacts)),
+      stat("Builds", String(m.builds), m.lastBuildAt ? `last ${new Date(m.lastBuildAt).toLocaleString()}` : ""),
+    ),
+    el("p", { class: "muted" },
+      "“Saved by caching” is the model spend avoided by serving unchanged steps from cache instead of recomputing them — the core of treating LLM work like a build."),
+  );
 }
 
 async function renderSnapshots() {

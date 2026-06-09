@@ -4,11 +4,13 @@ import { loadWorkspace, resolveDirs, findWorkspaceRoot } from "../core/workspace
 import { Store } from "../core/store.js";
 import { Engine } from "../core/engine.js";
 import { listPrompts } from "../core/prompts.js";
-import { scaffoldWorkspace } from "../core/scaffold.js";
+import { scaffoldWorkspace, scaffoldDemo } from "../core/scaffold.js";
+import { mockEnabled, selectRunners } from "../llm/runners.js";
 import { snapshot as gitSnapshot, listSnapshots } from "../core/snapshot.js";
 import { exportWorkflowHtml } from "../core/exporter.js";
 import { dagEdges } from "../core/graph.js";
 import { diffLines, diffStats } from "../core/diff.js";
+import { computeMetrics } from "../core/metrics.js";
 
 const c = {
   reset: "\x1b[0m",
@@ -44,10 +46,14 @@ async function main() {
   switch (command) {
     case "init":
       return cmdInit(positionals[0], flags);
+    case "demo":
+      return cmdDemo(positionals[0], flags);
     case "build":
       return cmdBuild(positionals[0], flags);
     case "status":
       return cmdStatus(positionals[0]);
+    case "stats":
+      return cmdStats();
     case "ls":
     case "workflows":
       return cmdLs();
@@ -85,16 +91,20 @@ ${c.bold("Usage:")} loom <command> [options]
 
 ${c.bold("Commands:")}
   init [name]              Scaffold a new workspace in the current directory
-  build [workflow]         Build a workflow (or all workflows). --force, --all
+  demo [name]              Scaffold + build a rich demo workspace offline (mock)
+  build [workflow]         Build a workflow (or all). --force, --all, --mock
   status [workflow]        Show which steps are fresh vs stale
+  stats                    Tokens, cost, and $ saved by caching
   ls                       List workflows and their steps
   prompts                  List the prompt library
   snapshot -m "message"    Commit a git snapshot of the workspace
   snapshot list            List recent snapshots
   export <workflow>        Write a shareable self-contained HTML file
   diff <workflow> <step>   Diff a step's current output vs its previous version
-  serve [--port 4319]      Launch the local web UI (with live updates)
+  serve [--port 4319]      Launch the local web UI (--mock for offline demos)
   version                  Print version
+
+${c.bold("Tip:")} run ${c.cyan("loom demo && loom serve --mock")} for a full, key-free walkthrough.
 
 ${c.bold("Examples:")}
   loom init my-project
@@ -105,12 +115,12 @@ ${c.bold("Examples:")}
 `);
 }
 
-function openWorkspace() {
+function openWorkspace(mock = false) {
   const ws = loadWorkspace();
   const dirs = resolveDirs(ws);
   const store = new Store(dirs.loom);
   store.init();
-  return { ws, dirs, store, engine: new Engine(ws, dirs, store) };
+  return { ws, dirs, store, engine: new Engine(ws, dirs, store, selectRunners(mock)) };
 }
 
 function cmdInit(name: string | undefined, flags: Record<string, string | boolean>) {
@@ -126,8 +136,34 @@ function cmdInit(name: string | undefined, flags: Record<string, string | boolea
   console.log(`\nNext:\n  ${c.cyan("export ANTHROPIC_API_KEY=...")}\n  ${c.cyan("loom build brief")}\n  ${c.cyan("loom serve")}`);
 }
 
+async function cmdDemo(name: string | undefined, flags: Record<string, string | boolean>) {
+  const root = resolve(process.cwd(), (flags.dir as string) ?? ".");
+  if (findWorkspaceRoot(root) === root) {
+    console.error(c.yellow("A Loom workspace already exists here — `cd` somewhere empty first."));
+    return;
+  }
+  const wsName = name ?? "Loom Demo";
+  const created = scaffoldDemo(root, wsName);
+  console.log(c.green(`Created demo workspace "${wsName}".`));
+  for (const f of created) console.log("  " + c.dim("created ") + f);
+
+  if (flags["no-build"]) {
+    console.log(`\nRun it offline:\n  ${c.cyan("loom build --mock")}\n  ${c.cyan("loom serve --mock")}`);
+    return;
+  }
+  console.log(c.bold("\nBuilding the pipeline offline (mock mode)…"));
+  await cmdBuild(undefined, { mock: true });
+  console.log(
+    `\n${c.green("Demo ready.")} Explore it:\n` +
+      `  ${c.cyan("loom serve --mock")}   ${c.dim("# open the UI; build/rebuild, watch the DAG, diff versions")}\n` +
+      `  ${c.cyan("loom stats")}          ${c.dim("# tokens, cost, and $ saved by caching")}\n` +
+      `  ${c.cyan("loom export launch")}  ${c.dim("# shareable self-contained HTML")}`,
+  );
+}
+
 async function cmdBuild(workflow: string | undefined, flags: Record<string, string | boolean>) {
-  const { ws, engine } = openWorkspace();
+  const mock = mockEnabled(!!flags.mock);
+  const { ws, engine } = openWorkspace(mock);
   const force = !!flags.force;
   const targets = workflow
     ? [workflow]
@@ -139,6 +175,7 @@ async function cmdBuild(workflow: string | undefined, flags: Record<string, stri
     process.exitCode = 1;
     return;
   }
+  if (mock) console.log(c.dim("(mock mode — synthesizing outputs offline, no API calls)"));
 
   let failed = false;
   for (const id of targets) {
@@ -176,6 +213,20 @@ function cmdStatus(workflow: string | undefined) {
       console.log(`  ${mark}  ${s.stepId} ${c.dim(`(${s.type})`)}${s.note ? c.dim("  " + s.note) : ""}`);
     }
   }
+}
+
+function cmdStats() {
+  const { store } = openWorkspace();
+  const m = computeMetrics(store);
+  const usd = (n: number) => `$${n.toFixed(4)}`;
+  console.log(c.bold("Usage & savings"));
+  console.log(`  ${c.dim("builds")}        ${m.builds}`);
+  console.log(`  ${c.dim("model calls")}   ${m.modelCalls}`);
+  console.log(`  ${c.dim("cache hits")}    ${m.cacheHits}  ${c.dim(`(${Math.round(m.cacheHitRate * 100)}% hit rate)`)}`);
+  console.log(`  ${c.dim("tokens")}        ${m.tokensIn} in / ${m.tokensOut} out`);
+  console.log(`  ${c.dim("artifacts")}     ${m.artifacts}`);
+  console.log(`  ${c.dim("spent")}         ${c.yellow(usd(m.spentUsd))}`);
+  console.log(`  ${c.dim("saved by cache")} ${c.green(usd(m.savedUsd))}`);
 }
 
 function cmdLs() {
@@ -277,7 +328,7 @@ function cmdDiff(positionals: string[], flags: Record<string, string | boolean>)
 async function cmdServe(flags: Record<string, string | boolean>) {
   const { startServer } = await import("../server/server.js");
   const port = flags.port ? Number(flags.port) : 4319;
-  await startServer({ port });
+  await startServer({ port, mock: mockEnabled(!!flags.mock) });
 }
 
 main().catch((err) => {

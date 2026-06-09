@@ -12,6 +12,8 @@ import { snapshot as gitSnapshot, listSnapshots } from "../core/snapshot.js";
 import { exportWorkflowHtml } from "../core/exporter.js";
 import { listFilesRecursive } from "../core/workspace.js";
 import { diffLines, diffStats } from "../core/diff.js";
+import { selectRunners } from "../llm/runners.js";
+import { computeMetrics } from "../core/metrics.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, "../web/public");
@@ -31,15 +33,18 @@ interface Ctx {
   engine: Engine;
 }
 
+let MOCK = false;
+
 function ctx(): Ctx {
   const ws = loadWorkspace();
   const dirs = resolveDirs(ws);
   const store = new Store(dirs.loom);
   store.init();
-  return { ws, dirs, store, engine: new Engine(ws, dirs, store) };
+  return { ws, dirs, store, engine: new Engine(ws, dirs, store, selectRunners(MOCK)) };
 }
 
-export async function startServer({ port = 4319 }: { port?: number } = {}): Promise<void> {
+export async function startServer({ port = 4319, mock = false }: { port?: number; mock?: boolean } = {}): Promise<void> {
+  MOCK = mock;
   // Validate there is a workspace before binding.
   ctx();
 
@@ -83,7 +88,11 @@ export async function startServer({ port = 4319 }: { port?: number } = {}): Prom
 
   await new Promise<void>((r) => server.listen(port, r));
   // eslint-disable-next-line no-console
-  console.log(`\n  Loom UI running at http://localhost:${port}\n  (Ctrl+C to stop)\n`);
+  console.log(
+    `\n  Loom UI running at http://localhost:${port}` +
+      (MOCK ? "  (mock mode — no API calls)" : "") +
+      `\n  (Ctrl+C to stop)\n`,
+  );
 }
 
 function serveStatic(path: string, res: ServerResponse) {
@@ -133,6 +142,7 @@ async function api(
       description: ws.config.description,
       root: ws.root,
       defaultModel: defaultModel(ws),
+      mock: MOCK,
       workflows,
       state: store.readState(),
     });
@@ -234,6 +244,11 @@ async function api(
     const { engine } = ctx();
     const workflow = url.searchParams.get("workflow") ?? "";
     return sendJson(res, 200, { status: engine.status(workflow) });
+  }
+
+  if (path === "/api/metrics" && method === "GET") {
+    const { store } = ctx();
+    return sendJson(res, 200, { metrics: computeMetrics(store), mock: MOCK });
   }
 
   if (path === "/api/events" && method === "GET") {

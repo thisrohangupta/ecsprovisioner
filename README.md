@@ -32,6 +32,21 @@ inputs/ + context/ + prompts/  ──▶  workflow (DAG of steps)  ──▶  ar
   append-only event log + a live WebSocket layer) is built so real-time
   multiplayer can be layered on without a rewrite.
 
+## Try it in 10 seconds (no API key)
+
+```bash
+npm install && npm run build
+mkdir demo && cd demo
+node ../dist/cli/index.js demo          # scaffolds + builds a full pipeline offline
+node ../dist/cli/index.js serve --mock  # open http://localhost:4319
+```
+
+`demo` builds a believable product pipeline — **research → analysis → PRD → launch
+blog → a coding-agent that ships a landing page** — using a deterministic **mock
+provider**, so the whole product (DAG, caching, diffs, cost dashboard, sharing)
+is demoable with zero setup. Rebuild and watch every step go *cached*; the
+**Metrics** tab shows the model spend you just avoided.
+
 ## Install
 
 ```bash
@@ -133,8 +148,10 @@ hashes + model + step config. On build:
 | Command | What it does |
 | --- | --- |
 | `loom init [name]` | Scaffold a new workspace |
-| `loom build [workflow]` | Build a workflow (or all). `--force`, `--all` |
+| `loom demo [name]` | Scaffold + build a rich demo workspace offline (mock) |
+| `loom build [workflow]` | Build a workflow (or all). `--force`, `--all`, `--mock` |
 | `loom status [workflow]` | Fresh / stale / unbuilt per step |
+| `loom stats` | Tokens, cost, and **$ saved by caching** |
 | `loom ls` | List workflows and their step DAG |
 | `loom prompts` | List the prompt library |
 | `loom snapshot -m "msg"` | Commit a git snapshot · `loom snapshot list` |

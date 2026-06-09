@@ -103,6 +103,19 @@ input.text { font: inherit; padding: .4rem .6rem; border: 1px solid var(--line);
 .toast { position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--ink); color: #fff; padding: .6rem 1rem; border-radius: 8px; opacity: 0; transition: opacity .2s; }
 .toast.show { opacity: 1; }
 
+/* ---- metrics ---- */
+.mockpill { margin-left: .5rem; font-size: .65rem; text-transform: uppercase; letter-spacing: .05em;
+  background: var(--accent); color: #fff; padding: .1rem .45rem; border-radius: 999px; vertical-align: middle; }
+.banner { background: var(--accent-soft); border: 1px solid #e3c3b2; color: #8a4a2c; padding: .6rem .9rem;
+  border-radius: 10px; margin-bottom: 1rem; font-size: .88rem; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 1.1rem 1.2rem; }
+.stat-val { font-size: 1.9rem; font-weight: 700; letter-spacing: -.01em; }
+.stat-label { color: var(--muted); font-size: .82rem; margin-top: .15rem; }
+.stat-sub { color: var(--muted); font-size: .75rem; margin-top: .3rem; }
+.stat.good { border-color: #9ec9ab; background: linear-gradient(180deg, rgba(63,143,91,.08), transparent); }
+.stat.good .stat-val { color: var(--ok); }
+
 /* ---- DAG view ---- */
 .legend { display: flex; align-items: center; gap: 1rem; margin: .4rem 0 .2rem; font-size: .78rem; color: var(--muted); }
 .legend-item { display: inline-flex; align-items: center; gap: .35rem; }
