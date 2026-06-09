@@ -9,10 +9,30 @@ const SVGNS = "http://www.w3.org/2000/svg";
 // one currently selected by appending ?ws=<id> (the server defaults to the cwd
 // workspace when it's absent, so /api/workspaces itself needs no scoping).
 let currentWs = null;
+let currentRole = "owner"; // the caller's role in the current workspace
+
+// Share tokens, kept per-workspace in localStorage. A token rides on the
+// invite link (?ws=…&token=…); we stash it and send it with every request.
+function tokenStore() {
+  try { return JSON.parse(localStorage.getItem("loom.tokens") || "{}"); } catch { return {}; }
+}
+function getToken(ws) { return (ws && tokenStore()[ws]) || null; }
+function setToken(ws, t) {
+  const m = tokenStore();
+  if (t) m[ws] = t; else delete m[ws];
+  localStorage.setItem("loom.tokens", JSON.stringify(m));
+}
+
 function withWs(path) {
   if (!currentWs || !path.startsWith("/api/") || path.startsWith("/api/workspaces")) return path;
-  return path + (path.includes("?") ? "&" : "?") + "ws=" + encodeURIComponent(currentWs);
+  let p = path + (path.includes("?") ? "&" : "?") + "ws=" + encodeURIComponent(currentWs);
+  const tok = getToken(currentWs);
+  if (tok) p += "&token=" + encodeURIComponent(tok);
+  return p;
 }
+
+const canEdit = () => currentRole === "editor" || currentRole === "owner";
+const isOwner = () => currentRole === "owner";
 
 const api = {
   async get(path) {
@@ -194,7 +214,8 @@ function connectWS() {
   const dot = document.getElementById("conn-dot");
   const label = document.getElementById("conn-label");
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const tok = getToken(currentWs);
+  const ws = new WebSocket(`${proto}://${location.host}/ws${tok ? "?token=" + encodeURIComponent(tok) : ""}`);
   collab.ws = ws;
   ws.onopen = () => { dot.className = "dot on"; label.textContent = "live"; };
   ws.onclose = () => {
@@ -209,11 +230,12 @@ function connectWS() {
       if (!collab.wsId && m.ws) collab.wsId = m.ws;
       sendCollab({ type: "identify", name: collab.me.name, color: collab.me.color });
       // re-assert our workspace / doc / focus after a (re)connect
-      if (collab.wsId) sendCollab({ type: "ws.select", ws: collab.wsId });
+      if (collab.wsId) sendCollab({ type: "ws.select", ws: collab.wsId, token: getToken(collab.wsId) });
       if (collab.activePath) sendCollab({ type: "doc.open", path: collab.activePath });
       if (collab.focus) sendCollab({ type: "focus", focus: collab.focus });
       return;
     }
+    if (m.type === "ws.role") { if (m.data.ws === collab.wsId) applyRole(m.data.role); return; }
     if (m.type === "presence.focus") {
       if (m.data.ws && m.data.ws !== collab.wsId) return; // another workspace
       dag.focusList = m.data.focus || []; renderDagPresence(); return;
@@ -313,9 +335,14 @@ function renderWsSwitcher() {
     sel.append(el("option", { value: w.id, selected: w.id === currentWs ? "selected" : null }, w.name));
   }
   sel.onchange = () => switchWorkspace(sel.value);
-  const addBtn = el("button", { class: "btn ghost small", title: "Add a workspace by path" }, "+");
+  const addBtn = el("button", { class: "btn ghost small requires-owner", title: "Add a workspace by path" }, "+");
   addBtn.onclick = addWorkspacePrompt;
   host.append(sel, addBtn);
+  // show a role badge to anyone who isn't the owner, so collaborators know
+  // what they can do
+  if (currentRole && currentRole !== "owner") {
+    host.append(el("span", { class: "role-badge", "data-r": currentRole, title: `You have ${currentRole} access` }, currentRole));
+  }
 }
 async function addWorkspacePrompt() {
   const root = prompt("Path to a Loom workspace (a directory with loom.yaml):");
@@ -338,13 +365,35 @@ async function switchWorkspace(id) {
   dag.selectedKey = null;
   currentWs = id;
   collab.wsId = id;
-  sendCollab({ type: "ws.select", ws: id }); // move our presence to the new workspace
+  sendCollab({ type: "ws.select", ws: id, token: getToken(id) }); // move presence + re-resolve role
   await boot({ keepConn: true });
+}
+
+// An invite link carries ?ws=…&token=… — stash the token (per workspace) and
+// scrub it from the address bar so it isn't shoulder-surfed or bookmarked.
+function consumeInviteLink() {
+  const p = new URLSearchParams(location.search);
+  const ws = p.get("ws");
+  const token = p.get("token");
+  if (ws) currentWs = ws;
+  if (ws && token) {
+    setToken(ws, token);
+    p.delete("token");
+    const qs = p.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+  }
+}
+
+function applyRole(role) {
+  currentRole = role || "viewer";
+  document.body.dataset.role = currentRole;
 }
 
 async function boot(opts = {}) {
   await loadWorkspaces();
   workspace = await api.get("/api/workspace");
+  applyRole(workspace.role);
+  renderWsSwitcher(); // repaint with the role badge now that we know it
   document.getElementById("ws-name").textContent = workspace.name;
   document.getElementById("ws-desc").textContent = workspace.description || "";
   const existingPill = document.querySelector(".mockpill");
@@ -504,9 +553,9 @@ async function renderWorkflows() {
   dag.detailEls.clear();
   dag.presenceEls.clear();
 
-  const newWfBtn = el("button", { class: "btn small" }, "+ New workflow");
+  const newWfBtn = el("button", { class: "btn small requires-editor" }, "+ New workflow");
   newWfBtn.onclick = () => newWorkflow();
-  const yamlBtn = el("button", { class: "btn ghost small" }, "Edit loom.yaml");
+  const yamlBtn = el("button", { class: "btn ghost small requires-editor" }, "Edit loom.yaml");
   yamlBtn.onclick = () => editConfigYaml();
   main.append(el("div", { class: "row toolbar" }, newWfBtn, yamlBtn));
 
@@ -524,14 +573,14 @@ async function renderWorkflows() {
       };
     };
 
-    const buildBtn = el("button", { class: "btn small" }, "Build");
+    const buildBtn = el("button", { class: "btn small requires-editor" }, "Build");
     buildBtn.onclick = async () => {
       setLog(); logEl.textContent = ""; buildBtn.disabled = true;
       try { await api.post("/api/build", { workflow: wf.id }); }
       catch (err) { toast(err.message); }
       finally { buildBtn.disabled = false; }
     };
-    const forceBtn = el("button", { class: "btn ghost small" }, "Rebuild");
+    const forceBtn = el("button", { class: "btn ghost small requires-editor" }, "Rebuild");
     forceBtn.onclick = async () => {
       setLog(); logEl.textContent = ""; forceBtn.disabled = true;
       try { await api.post("/api/build", { workflow: wf.id, force: true }); }
@@ -543,7 +592,7 @@ async function renderWorkflows() {
       try { const { url } = await api.post("/api/export", { workflow: wf.id }); window.open(url, "_blank"); }
       catch (err) { toast(err.message); }
     };
-    const addStepBtn = el("button", { class: "btn ghost small" }, "+ Step");
+    const addStepBtn = el("button", { class: "btn ghost small requires-editor" }, "+ Step");
     addStepBtn.onclick = () => addStep(wf.id);
 
     const dagWrap = el("div", { class: "dag" }, renderDagSvg(wf));
@@ -835,7 +884,7 @@ function renderFileEditor(title, items, dir, rerender) {
 
   let currentPath = null;
   const textarea = el("textarea", { class: "editor" });
-  const saveBtn = el("button", { class: "btn small" }, "Publish");
+  const saveBtn = el("button", { class: "btn small requires-editor" }, "Publish");
   const fileLabel = el("strong", {}, "");
   const presenceEl = el("span", { class: "presence" });
   const youChip = el("span", { class: "avatar you", style: `background:${collab.me.color}`, title: `You (${collab.me.name})` }, initials(collab.me.name));
@@ -943,6 +992,7 @@ function renderFileEditor(title, items, dir, rerender) {
     currentPath = relPath;
     fileLabel.textContent = relPath;
     editorCard.style.display = "block";
+    textarea.readOnly = !canEdit(); // viewers can watch live but not type
     remoteCursors = [];
     lastSentAnchor = "?";
     cursorLayer.replaceChildren();
@@ -970,7 +1020,7 @@ function renderFileEditor(title, items, dir, rerender) {
     sendCollab({ type: "doc.open", path: relPath });
   };
 
-  const newBtn = el("button", { class: "btn small" }, "+ New");
+  const newBtn = el("button", { class: "btn small requires-editor" }, "+ New");
   newBtn.onclick = async () => {
     let name = prompt(`New file name in ${dir}/`, "untitled.md");
     if (!name) return;
@@ -986,7 +1036,7 @@ function renderFileEditor(title, items, dir, rerender) {
 
   if (!items.length) list.append(el("li", { class: "empty" }, "Nothing here yet — create one with “+ New”."));
   for (const it of items) {
-    const del = el("button", { class: "btn ghost small", title: "delete" }, "✕");
+    const del = el("button", { class: "btn ghost small requires-editor", title: "delete" }, "✕");
     del.onclick = async (ev) => {
       ev.stopPropagation();
       if (!confirm(`Delete ${it.path}?`)) return;
@@ -1103,13 +1153,79 @@ function shareLinkRow(url) {
   return el("div", { class: "row share-link" }, input, copy, open, dl);
 }
 
+function inviteUrl(link) {
+  // the server hands back a relative "?ws=…&token=…"; make it absolute so it
+  // works when pasted into another browser / sent to a collaborator
+  return `${location.origin}${location.pathname}${link}`;
+}
+
+function renderSharingPanel() {
+  const card = el("div", { class: "card requires-owner" });
+  const roleSel = el("select", { class: "ws-select" },
+    el("option", { value: "editor" }, "editor — can edit & build"),
+    el("option", { value: "viewer" }, "viewer — read-only"));
+  const label = el("input", { class: "text", placeholder: "label (optional)", style: "flex:1" });
+  const makeBtn = el("button", { class: "btn small" }, "Create invite link");
+  const list = el("div", {});
+  const linkOut = el("div", {});
+
+  const refresh = async () => {
+    try {
+      const { tokens } = await api.get("/api/share");
+      list.replaceChildren();
+      if (!tokens.length) { list.append(el("p", { class: "empty" }, "No invite links yet.")); return; }
+      for (const t of tokens) {
+        const revoke = el("button", { class: "btn ghost small", title: "revoke" }, "✕");
+        revoke.onclick = async () => {
+          if (!confirm(`Revoke this ${t.role} link${t.label ? ` (${t.label})` : ""}?`)) return;
+          try { await api.send("DELETE", `/api/share?id=${encodeURIComponent(t.id)}`); refresh(); }
+          catch (err) { toast(err.message); }
+        };
+        list.append(el("div", { class: "share-row" },
+          el("span", { class: "share-pill" }, t.role),
+          el("span", {}, t.label || el("span", { class: "muted" }, "—")),
+          el("span", { class: "spacer" }),
+          el("span", { class: "muted", style: "font-size:.75rem" }, new Date(t.createdAt).toLocaleDateString()),
+          revoke));
+      }
+    } catch { /* not owner / no access */ }
+  };
+
+  makeBtn.onclick = async () => {
+    try {
+      const { link } = await api.post("/api/share", { role: roleSel.value, label: label.value });
+      const full = inviteUrl(link);
+      const input = el("input", { class: "text", style: "flex:1", value: full, readonly: "" });
+      const copy = el("button", { class: "btn small" }, "Copy");
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(full); toast("Invite link copied"); }
+        catch { input.select(); document.execCommand?.("copy"); toast("Invite link copied"); }
+      };
+      linkOut.replaceChildren(el("div", { class: "row share-link" },
+        el("span", { class: "share-pill" }, roleSel.value), input, copy));
+      label.value = "";
+      refresh();
+    } catch (err) { toast(err.message); }
+  };
+
+  card.append(
+    el("div", { class: "row" }, el("strong", {}, "Collaborators"),
+      el("span", { class: "muted" }, "share a live link — anyone with it joins with that role"),
+      el("span", { class: "spacer" })),
+    el("div", { class: "row", style: "gap:.5rem;margin:.5rem 0" }, roleSel, label, makeBtn),
+    linkOut, list);
+  refresh();
+  return card;
+}
+
 async function renderShare() {
   main.replaceChildren(el("h1", { class: "page" }, "Share"));
+  if (isOwner()) main.append(renderSharingPanel());
   main.append(el("p", { class: "muted" },
     "Exports are self-contained HTML — open offline, email them, or host anywhere. The links below work while this local server runs."));
 
-  const allBtn = el("button", { class: "btn" }, "Export everything");
-  const bundleBtn = el("button", { class: "btn ghost" }, "Single file");
+  const allBtn = el("button", { class: "btn requires-editor" }, "Export everything");
+  const bundleBtn = el("button", { class: "btn ghost requires-editor" }, "Single file");
   const allRow = el("div", {});
   allBtn.onclick = async () => {
     try {
@@ -1133,7 +1249,7 @@ async function renderShare() {
 
   for (const wf of workspace.workflows) {
     const linkRow = el("div", {});
-    const btn = el("button", { class: "btn small" }, "Export & link");
+    const btn = el("button", { class: "btn small requires-editor" }, "Export & link");
     btn.onclick = async () => {
       try {
         const { url } = await api.post("/api/export", { workflow: wf.id });
@@ -1160,7 +1276,7 @@ async function renderSnapshots() {
       else toast(res.reason || "Nothing to snapshot");
     } catch (err) { toast(err.message); }
   };
-  main.append(el("div", { class: "card" }, el("div", { class: "row" }, msg, btn)));
+  main.append(el("div", { class: "card requires-editor" }, el("div", { class: "row" }, msg, btn)));
 
   const card = el("div", { class: "card" });
   if (!snapshots.length) card.append(el("p", { class: "empty" }, "No snapshots yet."));
@@ -1222,6 +1338,7 @@ function renderSnapshotCompare(snapshots) {
     filesBox, diffBox);
 }
 
+consumeInviteLink();
 boot().catch((err) => {
   main.replaceChildren(el("div", { class: "card" },
     el("h2", {}, "No workspace"),
