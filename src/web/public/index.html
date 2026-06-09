@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Loom</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◳</span>
+      <div>
+        <strong id="ws-name">Loom</strong>
+        <span id="ws-desc" class="muted"></span>
+      </div>
+    </div>
+    <div class="conn">
+      <span id="conn-dot" class="dot off"></span>
+      <span id="conn-label" class="muted">connecting…</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar">
+      <button class="nav active" data-view="workflows">Workflows</button>
+      <button class="nav" data-view="inputs">Inputs</button>
+      <button class="nav" data-view="prompts">Prompts</button>
+      <button class="nav" data-view="artifacts">Artifacts</button>
+      <button class="nav" data-view="snapshots">Snapshots</button>
+      <div class="activity-wrap">
+        <div class="activity-title">Activity</div>
+        <ul id="activity" class="activity"></ul>
+      </div>
+    </nav>
+
+    <main id="main"></main>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

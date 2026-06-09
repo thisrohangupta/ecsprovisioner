@@ -1,0 +1,49 @@
+{
+  "name": "loom",
+  "version": "0.1.0",
+  "description": "A local-first build system for LLM workflows — make for prompts, agents, and context.",
+  "type": "module",
+  "bin": {
+    "loom": "dist/cli/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src/web/public"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run copy:web",
+    "copy:web": "node -e \"const fs=require('fs');fs.cpSync('src/web/public','dist/web/public',{recursive:true})\"",
+    "dev": "tsx src/cli/index.ts",
+    "loom": "tsx src/cli/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "@anthropic-ai/sdk": "latest",
+    "ws": "^8.18.0",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "llm",
+    "claude",
+    "workflow",
+    "build-system",
+    "prompts",
+    "agents",
+    "local-first"
+  ],
+  "license": "MIT"
+}

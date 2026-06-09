@@ -1,9 +1,18 @@
-#  Local .terraform directories
-**/.terraform/*
+# Dependencies
+node_modules/
 
-# .tfstate files
-*.tfstate
-*.tfstate.*
+# Build output
+dist/
 
-# .tfvars files
-*.tfvars
+# Secrets / env
+.env
+.env.*
+
+# Loom build cache (artifacts are content-addressed and rebuildable;
+# outputs, state, and the event log ARE tracked so snapshots capture results)
+**/.loom/cache/
+**/.loom/tmp/
+
+# OS / editor
+.DS_Store
+*.log
