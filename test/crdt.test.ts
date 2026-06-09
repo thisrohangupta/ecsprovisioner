@@ -63,6 +63,75 @@ test("snapshot round-trips through a fresh replica", () => {
   assert.equal(b.value(), a.value());
 });
 
+// ---- cursor anchors (the basis for CRDT-aware remote cursors) ----
+
+test("anchor round-trips at every caret position", () => {
+  const a = new CRDT(1);
+  typeString(a, "weave");
+  for (let i = 0; i <= 5; i++) {
+    assert.equal(a.indexOfAnchor(a.anchorAt(i)), i, `caret at ${i}`);
+  }
+});
+
+test("anchor survives a concurrent insert before the caret", () => {
+  const a = new CRDT(1);
+  const b = new CRDT(2);
+  const seed = typeString(a, "abc");
+  b.applyMany(seed);
+  // A's caret sits after "b" (index 2)
+  const anchor = a.anchorAt(2);
+  // B concurrently prepends "ZZ"
+  a.apply(b.localInsert(0, "Z"));
+  a.apply(b.localInsert(1, "Z"));
+  assert.equal(a.value(), "ZZabc");
+  // the anchor still names the "b" character — caret index shifted with it
+  assert.equal(a.indexOfAnchor(anchor), 4);
+});
+
+test("anchor is unmoved by a concurrent insert after the caret", () => {
+  const a = new CRDT(1);
+  const b = new CRDT(2);
+  const seed = typeString(a, "abc");
+  b.applyMany(seed);
+  const anchor = a.anchorAt(1); // after "a"
+  a.apply(b.localInsert(3, "!")); // edit beyond the caret
+  assert.equal(a.value(), "abc!");
+  assert.equal(a.indexOfAnchor(anchor), 1);
+});
+
+test("anchor on a deleted character collapses to where it was", () => {
+  const a = new CRDT(1);
+  typeString(a, "abcd");
+  const anchor = a.anchorAt(3); // after "c"
+  a.localDelete(2); // tombstone "c"
+  assert.equal(a.value(), "abd");
+  assert.equal(a.indexOfAnchor(anchor), 2); // between "b" and "d"
+});
+
+test("null anchor means document start; unknown anchor is unresolvable", () => {
+  const a = new CRDT(1);
+  typeString(a, "xy");
+  assert.equal(a.anchorAt(0), null);
+  assert.equal(a.indexOfAnchor(null), 0);
+  assert.equal(a.indexOfAnchor({ c: 99, s: 7 }), -1); // op never received
+});
+
+test("anchors resolve identically across replicas", () => {
+  const a = new CRDT(1);
+  const b = new CRDT(2);
+  const seed = typeString(a, "shared");
+  b.applyMany(seed);
+  const anchor = b.anchorAt(4); // B's caret after "r"
+  // both sides edit concurrently, then exchange
+  const opA = a.localInsert(0, "<");
+  const opB = b.localInsert(6, ">");
+  a.apply(opB);
+  b.apply(opA);
+  assert.equal(a.value(), b.value());
+  assert.equal(a.indexOfAnchor(anchor), b.indexOfAnchor(anchor));
+  assert.equal(a.value()[a.indexOfAnchor(anchor) - 1], "r"); // still after "r"
+});
+
 // Randomized convergence: two replicas make independent (concurrent) edits;
 // applying the union of ops in any order yields the same document everywhere.
 test("randomized concurrent edits converge regardless of op order", () => {

@@ -114,6 +114,19 @@ input.text { font: inherit; padding: .4rem .6rem; border: 1px solid var(--line);
 .avatar.you { box-shadow: 0 0 0 2px var(--accent); }
 .editing-note { font-size: .75rem; margin-left: .2rem; }
 
+/* ---- remote cursors (CRDT-anchored carets over the textarea) ---- */
+.editor-wrap { position: relative; }
+.editor-wrap textarea.editor { display: block; }
+.editor-mirror { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none;
+  white-space: pre-wrap; word-wrap: break-word; box-sizing: border-box; overflow: hidden; }
+.cursor-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.rcursor { position: absolute; width: 2px; background: var(--ccolor, #888); border-radius: 1px;
+  animation: rcursor-blink 1.1s steps(2, start) infinite; }
+.rcursor .flag { position: absolute; bottom: 100%; left: -1px; background: var(--ccolor, #888); color: #fff;
+  font-size: .62rem; font-weight: 600; line-height: 1.5; padding: 0 .35em; border-radius: 3px 3px 3px 0;
+  white-space: nowrap; animation: none; }
+@keyframes rcursor-blink { 50% { opacity: .35; } }
+
 /* ---- authoring: toolbar, modal, forms ---- */
 .toolbar { margin-bottom: 1rem; gap: .5rem; }
 .overlay { position: fixed; inset: 0; background: rgba(20,20,20,.4); display: flex; align-items: flex-start;

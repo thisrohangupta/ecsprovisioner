@@ -96,6 +96,51 @@ export class CRDT {
     for (const n of nodes) if (n.del) this.applyDelete(n.id);
   }
 
+  // --- cursor anchors (edit-stable positions) ---
+
+  /**
+   * Anchor for a caret at `index`: the id of the visible character *before*
+   * the caret (null = start of document). Unlike a plain index, an anchor
+   * names a character identity, so it stays correct as concurrent edits land.
+   */
+  anchorAt(index: number): OpId | null {
+    const vis = this.visible();
+    if (index <= 0 || vis.length === 0) return null;
+    return vis[Math.min(index, vis.length) - 1].id;
+  }
+
+  /**
+   * Resolve an anchor back to a caret index in the current document.
+   * Tombstoned anchors collapse to where the character used to be;
+   * unknown anchors (op not yet received) return -1.
+   */
+  indexOfAnchor(anchor: OpId | null): number {
+    if (!anchor) return 0;
+    if (!this.byKey.has(keyOf(anchor))) return -1;
+    const target = keyOf(anchor);
+    let count = 0;
+    let found = -1;
+    const walk = (n: Node) => {
+      if (found >= 0) return;
+      if (n.id) {
+        if (!n.del) count++;
+        if (keyOf(n.id) === target) {
+          found = count; // caret sits after the anchor char (or where it was)
+          return;
+        }
+      }
+      for (const c of n.children) {
+        walk(c);
+        if (found >= 0) return;
+      }
+    };
+    for (const c of this.root.children) {
+      walk(c);
+      if (found >= 0) break;
+    }
+    return found >= 0 ? found : -1;
+  }
+
   // --- local edits (return the op to broadcast) ---
 
   localInsert(index: number, ch: string): Op {

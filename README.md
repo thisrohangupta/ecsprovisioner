@@ -179,7 +179,9 @@ hashes + model + step config. On build:
   refreshed live as you build.
 - **Inputs / Context / Prompts** — browse, **create**, edit, and delete managed
   files, with **conflict-free (CRDT) collaborative editing**: concurrent edits
-  merge deterministically and presence avatars show who else is in the file.
+  merge deterministically, presence avatars show who else is in the file, and
+  **remote cursors** render each collaborator's caret (name-flagged, in their
+  color) at the right character even while everyone types at once.
 - **Artifacts** — every compiled output with full provenance, plus a
   "diff vs previous" button per artifact.
 - **Snapshots** — create and browse git snapshots.
@@ -201,9 +203,11 @@ hashes + model + step config. On build:
 
 - **Now:** git snapshots + diffing across snapshots; interactive DAG view;
   per-artifact history + diffs; cost/cache-savings metrics; in-UI authoring;
-  **conflict-free (CRDT) collaborative editing with presence**; offline mock
-  provider + demo; single-file shareable export bundle.
-- **Next:** CRDT-aware remote cursors; presence in the DAG; multi-workspace.
+  **conflict-free (CRDT) collaborative editing with presence and remote
+  cursors** (carets are anchored to CRDT character ids, so they stay on the
+  right character as concurrent edits land); offline mock provider + demo;
+  single-file shareable export bundle.
+- **Next:** presence in the DAG; multi-workspace.
 
 ## Tech
 
