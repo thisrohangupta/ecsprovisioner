@@ -160,6 +160,7 @@ hashes + model + step config. On build:
 | `loom export [workflow]` | Shareable HTML (no arg = all + index; `--bundle` = one file) |
 | `loom diff <workflow> <step>` | Diff a step's current output vs its previous version (`--from`, `--to`) |
 | `loom workspace list \| add [dir] \| remove <id>` | Manage the multi-workspace registry |
+| `loom share list \| create <role> [label] \| revoke <id>` | Manage workspace invite links |
 | `loom serve [--port 4319] [--host 0.0.0.0]` | Launch the local web UI (loopback by default) |
 
 ## The web UI
@@ -189,8 +190,9 @@ hashes + model + step config. On build:
 - **Artifacts** — every compiled output with full provenance, plus a
   "diff vs previous" button per artifact.
 - **Snapshots** — create and browse git snapshots.
-- **Share** — export a workflow or the whole workspace to self-contained HTML;
-  copy a link, open, or download to send externally.
+- **Share** — invite collaborators with role-based links (see *Sharing & roles*
+  below), and export a workflow or the whole workspace to self-contained HTML to
+  send externally.
 
 A **workspace switcher** in the top bar hosts several workspaces from one
 `loom serve`: pick one to scope every view to it, or **+** to register another
@@ -199,18 +201,46 @@ isolated per workspace, so two teams on two workspaces never cross streams. The
 registry lives at `$LOOM_HOME/workspaces.json` (default `~/.loom`) and is also
 editable from the CLI (`loom workspace list | add | remove`).
 
+## Sharing & roles (hosted multiplayer)
+
+Invite collaborators into a workspace with a **share link** that carries a role:
+
+- **viewer** — read-only: browse the DAG, outputs, artifacts, metrics, and
+  snapshots, and watch edits + presence live, but can't change anything.
+- **editor** — viewer, plus edit managed files (collaboratively), build,
+  snapshot, and export.
+- **owner** — editor, plus mint/revoke invite links and manage the workspace.
+
+The owner opens **Share → Collaborators**, picks a role, and copies a link like
+`http://host:4319/?ws=<id>&token=<secret>`. Anyone who opens it joins with that
+role — the UI hides controls they can't use and the server enforces it on every
+request and every WebSocket edit. Mint links from the terminal too:
+
+```bash
+loom share create editor "Dana"   # prints an invite link
+loom share list                    # list active invites
+loom share revoke <id>             # revoke one
+```
+
+Tokens live in `$LOOM_HOME/tokens.json` (host-side, never in the workspace
+files, so they don't leak through git). Files stay the source of truth; identity
+and access are a thin layer on top, so a single `loom serve` (on your machine or
+a shared host) becomes a live, multi-user workspace.
+
 ## Security model
 
-Loom serves a local web app that reads and writes files, so it's locked down to
-the machine it runs on:
+Loom serves a web app that reads and writes files, so access is locked down:
 
-- **Loopback only.** `loom serve` binds to `127.0.0.1` by default — not reachable
-  from the network. Pass `--host 0.0.0.0` to opt into LAN access (there's no
-  auth, so only on a trusted network).
+- **Loopback by default.** `loom serve` binds to `127.0.0.1` — not reachable
+  from the network. Pass `--host 0.0.0.0` to share on a (trusted) network or a
+  tunnel so collaborators can connect.
+- **Token-gated.** The host machine (loopback) is the owner; everyone else needs
+  a valid share token, whose role governs what they can do. Every REST request
+  and every collaborative edit is checked.
 - **Origin-checked.** WebSocket handshakes and state-changing HTTP requests are
-  rejected unless their `Origin` is loopback, so a malicious web page you visit
-  can't drive the API (CSRF / cross-site WebSocket hijacking). Non-browser
-  clients (the CLI, scripts) send no `Origin` and are allowed.
+  refused unless they're **same-origin** (or loopback), so a malicious web page
+  you visit can't drive the API (CSRF / cross-site WebSocket hijacking).
+  Non-browser clients (the CLI, scripts) send no `Origin` and are allowed.
 - **Confined file access.** The file API (REST and the collaborative editor)
   only reads and writes under the managed `inputs/`, `prompts/`, and `context/`
   directories; path traversal and reads of `.loom/` internals or `loom.yaml` are
@@ -236,10 +266,12 @@ the machine it runs on:
   right character as concurrent edits land); **live presence on the DAG**
   (avatars on the step each collaborator is inspecting); **multi-workspace**
   (one `loom serve` hosts a registry of workspaces with an in-UI switcher;
-  documents, presence, and builds are isolated per workspace); offline mock
-  provider + demo; single-file shareable export bundle.
-- **Next:** hosted multiplayer beyond a single machine — accounts, shared
-  cloud workspaces, and access control.
+  documents, presence, and builds are isolated per workspace); **shared
+  workspaces with role-based invite links** (owner / editor / viewer, enforced
+  on every request and edit); offline mock provider + demo; single-file
+  shareable export bundle.
+- **Next:** named accounts (vs. anonymous invite links), and a cloud-hosted
+  deployment so workspaces live beyond one machine.
 
 ## Tech
 

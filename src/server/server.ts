@@ -30,6 +30,15 @@ import {
   removeWorkspace,
   resolveWorkspaceRoot,
 } from "../core/registry.js";
+import {
+  type Role,
+  roleAtLeast,
+  isRole,
+  resolveRole,
+  publicTokens,
+  createToken,
+  revokeToken,
+} from "../core/access.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, "../web/public");
@@ -53,6 +62,10 @@ let MOCK = false;
 // The workspace used when a request doesn't name one (the cwd workspace, or the
 // first registered workspace). Set in startServer.
 let defaultWsId: string | null = null;
+// Whether a request from the host machine itself (loopback) is implicitly the
+// owner. True for local-first use; a pure hosted deployment can disable it so
+// access is governed entirely by share tokens.
+let OWNER_LOOPBACK = true;
 
 function buildCtx(ws: Workspace): Ctx {
   const dirs = resolveDirs(ws);
@@ -86,8 +99,9 @@ export interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export async function startServer({ port = 4319, host = "127.0.0.1", mock = false, quiet = false }: { port?: number; host?: string; mock?: boolean; quiet?: boolean } = {}): Promise<ServerHandle> {
+export async function startServer({ port = 4319, host = "127.0.0.1", mock = false, quiet = false, ownerLoopback = true }: { port?: number; host?: string; mock?: boolean; quiet?: boolean; ownerLoopback?: boolean } = {}): Promise<ServerHandle> {
   MOCK = mock;
+  OWNER_LOOPBACK = ownerLoopback;
   // Register the cwd workspace (if any) and make it the default; otherwise fall
   // back to the first already-registered workspace so the UI still has one.
   const cwdRoot = findWorkspaceRoot();
@@ -107,7 +121,8 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
     server,
     path: "/ws",
     // reject cross-site WebSocket hijacking from a page on another origin
-    verifyClient: (info: { origin?: string }) => isAllowedOrigin(info.origin),
+    verifyClient: (info: { origin?: string; req: IncomingMessage }) =>
+      originAllowed(info.origin, info.req.headers.host),
   });
   const broadcast = (msg: unknown) => {
     const data = JSON.stringify(msg);
@@ -126,6 +141,9 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
     id: string;
     user: CollabUser;
     ws: string; // workspace this socket is currently viewing
+    loopback: boolean; // connection is from the host machine (trusted owner)
+    token: string | null; // share token presented for the current workspace
+    role: Role | null; // resolved access role for `ws` (null = no access)
     path: string | null;
     // caret anchor = CRDT id of the char before the caret (null = doc start).
     // The server never interprets it; it just relays so peers can resolve it
@@ -135,6 +153,10 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
     // key (or null). Opaque to the server; drives presence avatars on the DAG.
     focus: string | null;
   }
+  // a socket's role for a workspace: a valid token grants its role, else the
+  // host machine (loopback) is owner, else no access.
+  const socketRole = (st: SocketState, ws: string): Role | null =>
+    resolveRole(ws, st.token) ?? (st.loopback && OWNER_LOOPBACK ? "owner" : null);
   const docs = new Map<string, CRDT>();
   const presence = new Map<string, Map<string, CollabUser>>();
   const sockState = new WeakMap<WebSocket, SocketState>();
@@ -213,11 +235,21 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
     }
   };
 
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, upreq) => {
     const site = nextId++;
     const id = `c${site}`;
-    sockState.set(socket, { id, user: { id, name: "Guest", color: "#888" }, ws: defaultWsId ?? "", path: null, cursor: null, focus: null });
-    socket.send(JSON.stringify({ type: "hello", clientId: id, site, ws: defaultWsId, ts: new Date().toISOString() }));
+    const loopback = isLoopbackReq(upreq);
+    // a token may ride on the upgrade URL (/ws?token=...)
+    const upUrl = new URL(upreq.url ?? "/ws", "http://localhost");
+    const initialWs = defaultWsId ?? "";
+    const st0: SocketState = {
+      id, user: { id, name: "Guest", color: "#888" }, ws: initialWs,
+      loopback, token: upUrl.searchParams.get("token"), role: null,
+      path: null, cursor: null, focus: null,
+    };
+    st0.role = socketRole(st0, initialWs);
+    sockState.set(socket, st0);
+    socket.send(JSON.stringify({ type: "hello", clientId: id, site, ws: defaultWsId, role: st0.role, ts: new Date().toISOString() }));
 
     socket.on("message", (raw) => {
       let m: Record<string, unknown>;
@@ -228,20 +260,25 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
       }
       const st = sockState.get(socket);
       if (!st) return;
-
+      try {
       if (m.type === "identify") {
         st.user = { id: st.id, name: String(m.name ?? "Guest").slice(0, 40), color: String(m.color ?? "#888") };
         if (st.path) announce(st.ws, st.path);
         if (st.focus) announceFocus(st.ws); // refresh name/color on the DAG too
       } else if (m.type === "ws.select" && typeof m.ws === "string") {
-        // switching workspaces: drop presence/focus in the old one
+        // switching workspaces: drop presence/focus in the old one, re-resolve role
         const old = st.ws;
         leave(socket);
         if (st.focus) { st.focus = null; announceFocus(old); }
         st.ws = m.ws;
+        if (typeof m.token === "string") st.token = m.token;
+        else if (m.token === null) st.token = null;
+        st.role = socketRole(st, m.ws);
+        socket.send(JSON.stringify({ type: "ws.role", data: { ws: m.ws, role: st.role } }));
       } else if (m.type === "doc.open" && typeof m.path === "string") {
-        // only managed files (inputs/, prompts/, context/) can be opened — the
-        // same confinement the REST file API enforces
+        // viewing requires access; only managed files can be opened (same
+        // confinement the REST file API enforces)
+        if (!st.role) return;
         if (!isManaged(st.ws, m.path)) return;
         leave(socket);
         st.path = m.path;
@@ -255,6 +292,8 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
       } else if (m.type === "doc.close") {
         leave(socket);
       } else if (m.type === "doc.ops" && typeof m.path === "string" && Array.isArray(m.ops)) {
+        // editing requires editor+ — viewers can watch but not change content
+        if (!st.role || !roleAtLeast(st.role, "editor")) return;
         if (!isManaged(st.ws, m.path)) return;
         const doc = loadDoc(st.ws, m.path);
         for (const op of m.ops as Op[]) doc.apply(op);
@@ -272,6 +311,10 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
           st.focus = next;
           announceFocus(st.ws);
         }
+      }
+      } catch {
+        // a transient error (e.g. a workspace mutated mid-message) must never
+        // crash the server; the client can retry
       }
     });
 
@@ -292,7 +335,7 @@ export async function startServer({ port = 4319, host = "127.0.0.1", mock = fals
     // cross-site forgery from a page in the user's browser — refuse it. (GETs
     // are protected by the same-origin policy: a cross-site page can't read the
     // response without a CORS header, which we never send.)
-    if (method !== "GET" && method !== "HEAD" && !isAllowedOrigin(req.headers.origin)) {
+    if (method !== "GET" && method !== "HEAD" && !originAllowed(req.headers.origin, req.headers.host)) {
       return sendJson(res, 403, { error: "cross-origin request refused" });
     }
 
@@ -380,14 +423,26 @@ async function api(
   // ignore them (e.g. a build in workspace A must not animate workspace B's DAG).
   const bcast = (e: unknown) => broadcast(e && typeof e === "object" ? { ...(e as object), ws: wsId } : e);
 
+  // --- access control: a valid token grants its role; otherwise the host
+  // machine itself (loopback) is the owner, and everyone else is unauthorized.
+  const loopback = isLoopbackReq(req);
+  const token = reqToken(url, req);
+  const roleFor = (id: string | null): Role | null =>
+    (id ? resolveRole(id, token) : null) ?? (loopback && OWNER_LOOPBACK ? "owner" : null);
+
   // --- multi-workspace registry ---
   if (path === "/api/workspaces" && method === "GET") {
+    // the host sees every workspace; a token-bearer sees only the ones they hold
+    const all = listWorkspaces();
+    const visible = loopback ? all : all.filter((w) => resolveRole(w.id, token) != null);
     return sendJson(res, 200, {
-      workspaces: listWorkspaces().map((w) => ({ ...w, default: w.id === defaultWsId })),
+      workspaces: visible.map((w) => ({ ...w, default: w.id === defaultWsId })),
       current: wsId,
     });
   }
+  // registering/removing workspaces is a host-level action (owner on the host)
   if (path === "/api/workspaces" && method === "POST") {
+    if (!loopback) return sendJson(res, 403, { error: "only the host can add workspaces" });
     const body = JSON.parse(await readBody(req)) as { root?: string };
     if (!body.root) return sendJson(res, 400, { error: "missing `root`" });
     try {
@@ -398,6 +453,7 @@ async function api(
     }
   }
   if (path === "/api/workspaces" && method === "DELETE") {
+    if (!loopback) return sendJson(res, 403, { error: "only the host can remove workspaces" });
     const id = url.searchParams.get("id") ?? "";
     if (id === defaultWsId) return sendJson(res, 400, { error: "can't remove the active workspace" });
     return sendJson(res, 200, { ok: removeWorkspace(id) });
@@ -407,6 +463,34 @@ async function api(
   const explicitWs = url.searchParams.get("ws");
   if (explicitWs && !resolveWorkspaceRoot(explicitWs)) {
     return sendJson(res, 400, { error: `Unknown workspace: ${explicitWs}` });
+  }
+
+  // Everything below is scoped to `wsId`; the caller must have a role for it.
+  const role = roleFor(wsId);
+  if (!role) return sendJson(res, 401, { error: "a valid share token is required" });
+  // share-link management is owner-only; any other mutation needs editor+.
+  const isShare = path === "/api/share";
+  if (isShare) {
+    if (role !== "owner") return sendJson(res, 403, { error: "only the owner can manage sharing" });
+  } else if (method !== "GET" && method !== "HEAD" && !roleAtLeast(role, "editor")) {
+    return sendJson(res, 403, { error: "this action requires editor access" });
+  }
+
+  // --- share links (owner-gated above) ---
+  if (path === "/api/share" && method === "GET") {
+    return sendJson(res, 200, { tokens: publicTokens(wsId!) });
+  }
+  if (path === "/api/share" && method === "POST") {
+    const body = JSON.parse(await readBody(req)) as { role?: string; label?: string };
+    if (!isRole(body.role)) return sendJson(res, 400, { error: "role must be owner, editor, or viewer" });
+    const entry = createToken(wsId!, body.role, body.label ?? "");
+    // a ready-to-share link the owner can copy
+    const link = `?ws=${encodeURIComponent(wsId!)}&token=${encodeURIComponent(entry.token)}`;
+    return sendJson(res, 200, { token: entry, link });
+  }
+  if (path === "/api/share" && method === "DELETE") {
+    const id = url.searchParams.get("id") ?? "";
+    return sendJson(res, 200, { ok: revokeToken(wsId!, id) });
   }
 
   if (path === "/api/workspace" && method === "GET") {
@@ -429,6 +513,7 @@ async function api(
       root: ws.root,
       defaultModel: defaultModel(ws),
       mock: MOCK,
+      role, // the caller's role in this workspace (drives the UI)
       workflows,
       state: store.readState(),
     });
@@ -673,19 +758,33 @@ function isInside(dir: string, child: string): boolean {
 }
 
 /**
- * Defend the local file API against malicious web pages (CSRF / cross-site
- * WebSocket hijacking): a browser always sends an Origin on WS handshakes and
- * on cross-site state-changing requests, so we only accept loopback origins.
- * A missing Origin means a non-browser client (the CLI, tests) — allowed.
+ * Defend the file API against malicious web pages (CSRF / cross-site WebSocket
+ * hijacking). A browser always sends an Origin on WS handshakes and on
+ * cross-site state-changing requests, so we accept only **same-origin** traffic
+ * (the Origin's host:port matches the server's own Host) plus loopback. A
+ * missing Origin means a non-browser client (the CLI, tests) — allowed. This
+ * works whether the server is on loopback or on a shared host.
  */
-function isAllowedOrigin(origin: string | undefined | null): boolean {
+function originAllowed(origin: string | undefined | null, hostHeader: string | undefined): boolean {
   if (!origin) return true;
   try {
-    const host = new URL(origin).hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const u = new URL(origin);
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1") return true;
+    return !!hostHeader && u.host === hostHeader;
   } catch {
     return false;
   }
+}
+
+/** True if the request comes from the host machine itself (the trusted owner). */
+function isLoopbackReq(req: IncomingMessage): boolean {
+  const a = req.socket.remoteAddress ?? "";
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+
+/** The token presented on a request (query param or header). */
+function reqToken(url: URL, req: IncomingMessage): string | null {
+  return url.searchParams.get("token") || (req.headers["x-loom-token"] as string | undefined) || null;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

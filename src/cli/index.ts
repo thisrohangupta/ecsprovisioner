@@ -68,6 +68,8 @@ async function main() {
     case "workspace":
     case "ws":
       return cmdWorkspace(positionals, flags);
+    case "share":
+      return cmdShare(positionals, flags);
     case "serve":
       return cmdServe(flags);
     case "version":
@@ -106,6 +108,7 @@ ${c.bold("Commands:")}
   export <workflow>        Write a shareable self-contained HTML file
   diff <workflow> <step>   Diff a step's current output vs its previous version
   workspace list|add|remove  Manage the multi-workspace registry
+  share list|create <role>|revoke  Manage workspace invite links (owner/editor/viewer)
   serve [--port 4319]      Launch the local web UI (--mock offline; --host to expose on LAN)
   version                  Print version
 
@@ -394,6 +397,42 @@ async function cmdWorkspace(positionals: string[], _flags: Record<string, string
   }
   console.error(c.red(`Unknown workspace subcommand: ${sub}`));
   console.log("usage: loom workspace <list | add [dir] | remove <id>>");
+  process.exitCode = 1;
+}
+
+async function cmdShare(positionals: string[], flags: Record<string, string | boolean>) {
+  const { workspaceId } = await import("../core/registry.js");
+  const { createToken, publicTokens, revokeToken, isRole } = await import("../core/access.js");
+  const root = findWorkspaceRoot();
+  if (!root) { console.error(c.red("No Loom workspace here. Run `loom init` first.")); process.exitCode = 1; return; }
+  const ws = loadWorkspace(root);
+  const wsId = workspaceId(ws.config.name, root);
+  const sub = positionals[0] ?? "list";
+
+  if (sub === "list" || sub === "ls") {
+    const toks = publicTokens(wsId);
+    if (!toks.length) { console.log(c.dim("No invite links yet. Create one with `loom share create <role>`.")); return; }
+    for (const t of toks) console.log(`${c.bold(t.id)}  ${c.cyan(t.role)}  ${c.dim(t.label || "")}`);
+    return;
+  }
+  if (sub === "create" || sub === "add") {
+    const role = positionals[1];
+    if (!isRole(role)) { console.error(c.red("usage: loom share create <owner|editor|viewer> [label]")); process.exitCode = 1; return; }
+    const t = createToken(wsId, role, positionals.slice(2).join(" "));
+    const host = typeof flags.host === "string" ? flags.host : "localhost";
+    const port = flags.port ? Number(flags.port) : 4319;
+    console.log(`${c.green("✓")} ${c.bold(role)} invite created (${c.dim(t.id)})`);
+    console.log(`  link: ${c.cyan(`http://${host}:${port}/?ws=${wsId}&token=${t.token}`)}`);
+    return;
+  }
+  if (sub === "revoke" || sub === "rm") {
+    const id = positionals[1];
+    if (!id) { console.error(c.red("usage: loom share revoke <id>")); process.exitCode = 1; return; }
+    console.log(revokeToken(wsId, id) ? `${c.green("✓")} revoked ${id}` : c.yellow(`no invite with id ${id}`));
+    return;
+  }
+  console.error(c.red(`Unknown share subcommand: ${sub}`));
+  console.log("usage: loom share <list | create <role> [label] | revoke <id>>");
   process.exitCode = 1;
 }
 
